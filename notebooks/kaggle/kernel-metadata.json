@@ -1,0 +1,17 @@
+{
+  "id": "swastikpandey1024/medvision-ai-kaggle-gpu",
+  "title": "MedVision-AI Kaggle GPU Training Pipeline",
+  "code_file": "medvision_ai_kaggle_gpu.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [
+    "rsna-pneumonia-detection-challenge"
+  ],
+  "kernel_sources": [],
+  "model_sources": []
+}
