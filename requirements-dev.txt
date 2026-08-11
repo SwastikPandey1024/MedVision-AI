@@ -1,0 +1,10 @@
+# MedVision-AI Development & Testing Dependencies
+-r requirements.txt
+
+pytest>=8.0.0
+pytest-cov>=4.1.0
+black>=24.0.0
+flake8>=7.0.0
+isort>=5.13.0
+mypy>=1.8.0
+tensorboard>=2.16.0

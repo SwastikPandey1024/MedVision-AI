@@ -1,0 +1,93 @@
+# MedVision-AI Master Configuration File
+
+project:
+  name: "MedVision-AI"
+  version: "0.1.0-alpha"
+  seed: 42
+  experiment_name: "exp_baseline_001"
+
+# Execution Mode Strategy:
+# - 'development': small subset/sample (5% data, 2 epochs) for fast local CPU smoke testing
+# - 'full': complete 100% dataset for cloud GPU training (Kaggle/Colab)
+execution:
+  mode: "development"  # Options: "development", "full"
+  sample_fraction_dev: 0.05
+  epochs_dev: 2
+
+# Hardware Device Strategy:
+# - Local Laptop: Intel i5 CPU (autodetect selects CPU)
+# - Cloud Environment: Tesla T4/P100 GPU (autodetect selects GPU)
+device:
+  autodetect: true
+  force_device: "AUTO"  # Options: "AUTO", "CPU", "GPU"
+
+data:
+  dataset_name: "RSNA Pneumonia Detection Challenge"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  metadata_dir: "data/metadata"
+  image_size: [224, 224]
+  channels: 3
+  batch_size: 32
+  num_workers: 4
+  split_ratios:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+
+model:
+  selected_architecture: "densenet121"  # Options: "custom_cnn", "densenet121", "efficientnetb0"
+  baseline:
+    name: "CustomCNNBaseline"
+    conv_blocks: 3
+    initial_filters: 32
+    dropout_rate: 0.3
+  densenet121:
+    backbone: "DenseNet121"
+    weights: "imagenet"
+    pooling: "avg"
+    dense_units: 256
+    dropout_rate: 0.4
+    unfreeze_layers: 20
+  efficientnetb0:
+    backbone: "EfficientNetB0"
+    weights: "imagenet"
+    pooling: "avg"
+    dense_units: 256
+    dropout_rate: 0.3
+    unfreeze_layers: 15
+
+training:
+  epochs_baseline: 15
+  epochs_transfer: 20
+  epochs_finetune: 15
+  initial_learning_rate: 1e-4
+  finetune_learning_rate: 1e-5
+  optimizer: "adam"
+  loss: "binary_crossentropy"
+  metrics: ["accuracy", "auc", "precision", "recall"]
+  early_stopping_patience: 5
+  reduce_lr_patience: 3
+
+explainability:
+  gradcam:
+    auto_detect_layer: true
+    target_layer_override: null  # Set string to override auto-detection
+    colormap: "COLORMAP_JET"
+    alpha: 0.4
+
+artifacts:
+  checkpoints_dir: "models/checkpoints"
+  production_dir: "models/production"
+  tensorboard_dir: "artifacts/tensorboard"
+  experiments_dir: "artifacts/experiments"
+
+api:
+  host: "0.0.0.0"
+  port: 5000
+  max_upload_size_mb: 16
+  allowed_extensions: ["png", "jpg", "jpeg", "dcm"]
+
+ui:
+  theme: "dark"
+  api_endpoint: "http://localhost:5000/predict"
