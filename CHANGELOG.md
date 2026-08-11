@@ -5,6 +5,17 @@ All notable changes to the **MedVision-AI** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-alpha] - 2026-08-11
+
+### Added
+- **Phase 2 Preprocessing Engine & `tf.data` Pipeline**:
+  - Implemented DICOM RescaleSlope/Intercept and Lung Windowing ($WC=40, WW=400$) in `src/medvision/data/dicom_utils.py`.
+  - Implemented one-time TFRecord serializer and sharding engine in `src/medvision/data/tfrecord_writer.py`.
+  - Implemented high-performance `tf.data.Dataset` input pipeline with augmentation ops in `src/medvision/data/preprocessing.py`.
+  - Added strict Anatomical Augmentation Policy document in `docs/adr/ADR-007-augmentation-policy.md`.
+  - Created lightweight PIL/OpenCV dev loader `src/medvision/data/local_dev_loader.py` for 5% CPU dev-subset testing.
+  - Added unit test suites in `tests/test_dicom_utils.py`, `tests/test_tfrecords.py`, and `tests/test_preprocessing.py` (15 passed tests).
+
 ## [0.2.0-alpha] - 2026-08-11
 
 ### Added
@@ -14,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Implemented data quality and integrity auditor `src/medvision/data/validation.py`.
   - Implemented patient-aware group splitter `create_patient_aware_splits` and zero-leakage verifier `verify_zero_patient_leakage` in `src/medvision/data/splits.py`.
   - Implemented EDA statistics generator and Markdown/JSON report exporter `src/medvision/data/eda.py`.
-  - Added synthetic unit tests in `tests/test_data.py` (Passed 7 unit tests).
+  - Added synthetic unit tests in `tests/test_data.py`.
   - Updated Kaggle GPU notebook with Phase 1 execution cells.
 
 ## [0.1.0-alpha] - 2026-08-11
