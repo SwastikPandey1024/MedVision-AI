@@ -2,6 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
 [![Framework](https://img.shields.io/badge/TensorFlow-2.16%2B-orange.svg)](https://tensorflow.org)
+[![Dataset: RSNA](https://img.shields.io/badge/Dataset-RSNA%20Pneumonia-blue.svg)](https://www.kaggle.com/c/rsna-pneumonia-detection-challenge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI Status](https://img.shields.io/badge/CI-passing-brightgreen.svg)](#)
 
@@ -12,33 +13,36 @@ An enterprise-grade, end-to-end, explainable deep-learning research application 
 
 ---
 
-## 💻 Hardware-Aware MLOps Architecture
+## 📊 Phase 1: RSNA Dataset & Data Engineering Summary
 
-MedVision-AI is architected for a **Hybrid Local CPU / Cloud GPU Workflow**:
+### Official Dataset Attribution
+This project uses the official **RSNA Pneumonia Detection Challenge Dataset** provided by the Radiological Society of North America (RSNA), NIH Clinical Center, and Kaggle.
+- **Dataset Source:** [Kaggle RSNA Pneumonia Detection Challenge](https://www.kaggle.com/c/rsna-pneumonia-detection-challenge)
 
-- **Local Laptop (Development & Control Environment)**:
-  - **Hardware:** Intel Core i5-13500H CPU, 16 GB RAM, integrated graphics (CPU-only execution).
-  - **Role:** Pipeline authoring, REST API & Streamlit development, unit testing, and fast CPU smoke tests (`execution_mode: "development"`).
-- **Cloud GPU (Training Environment - Kaggle / Google Colab)**:
-  - **Hardware:** Cloud NVIDIA Tesla T4 / P100 GPU.
-  - **Role:** Full dataset training, transfer learning, fine-tuning, and hyperparameter sweeps (`execution_mode: "full"`).
-- **GitHub Repository**: Single source of truth for all source code, tests, and configuration. Model weights are versioned in external artifact storage and never committed to git.
+### Dataset Statistics & Data Quality Audit
+- **Total Unique Patients / Images:** `26,684`
+- **Class Distribution:**
+  - `Normal` / `No Lung Opacity`: `20,672` (77.47%)
+  - `Pneumonia` (`Lung Opacity`): `6,012` (22.53%)
+- **Data Quality Audit Findings:**
+  - `0` duplicate patient records.
+  - `0` missing image files.
+  - `0` malformed bounding box coordinates ($x \ge 0, y \ge 0, w > 0, h > 0$).
+  - 100% target label consistency between CSV manifests.
 
----
-
-## 📌 Key Architectural Highlights
-
-- **Extensible Architecture Selection**: Model factory supporting **DenseNet121** (primary candidate), **EfficientNetB0**, and **Custom CNN Baseline**.
-- **Patient-Aware Group Splitting**: Mandatory `PatientID`-based partitioning to prevent data leakage between train/val/test splits.
-- **Dynamic Visual Explainability**: Grad-CAM heatmaps with automatic convolutional layer target detection.
-- **Decoupled Architecture**: Independent Flask REST API (`/health`, `/predict`) served separately from an interactive Streamlit UI dashboard.
+### Patient Leakage & Group-Aware Split Strategy
+To eliminate data leakage, patients are partitioned strictly by `patient_id` using target-stratified group splitting:
+- **Train Set (70%):** `18,678` unique patients.
+- **Validation Set (15%):** `4,003` unique patients.
+- **Test Set (15%):** `4,003` unique patients.
+- **Patient Leakage:** **`0.0%` patient overlap** across train, validation, and test splits.
 
 ---
 
 ## 🗺️ 13-Phase Implementation Roadmap
 
-- [x] **Phase 0: Foundational Hardware-Aware Architecture Setup** (Current)
-- [ ] **Phase 1: Dataset Acquisition & Quality Control EDA**
+- [x] **Phase 0: Foundational Hardware-Aware Architecture Setup**
+- [x] **Phase 1: Dataset Acquisition & Quality Control EDA** (Current)
 - [ ] **Phase 2: Preprocessing Engine & `tf.data` Pipeline**
 - [ ] **Phase 3: Custom CNN Baseline Model**
 - [ ] **Phase 4: DenseNet121 Transfer Learning Architecture**
@@ -54,47 +58,12 @@ MedVision-AI is architected for a **Hybrid Local CPU / Cloud GPU Workflow**:
 
 ---
 
-## 📁 Standardized Directory Structure
-
-```
-MedVision-AI/
-├── .github/workflows/      # CI/CD automation pipelines
-├── data/
-│   ├── raw/                # Unzipped DICOM/PNG images (git-ignored)
-│   ├── processed/          # Normalized tensors (git-ignored)
-│   └── metadata/           # Patient manifest CSVs (git-ignored)
-├── docs/                   # Engineering & Product Docs (PRD, BRD, SRS, ADRs)
-├── models/
-│   ├── checkpoints/        # Intermediate training checkpoints (git-ignored)
-│   └── production/         # Exported production model artifacts (git-ignored)
-├── artifacts/
-│   ├── tensorboard/        # TensorBoard training logs (git-ignored)
-│   └── experiments/        # Metrics & confusion matrices (git-ignored)
-├── src/medvision/          # Core Python Package
-│   ├── config/             # YAML & settings loaders
-│   ├── data/               # Loaders, preprocessors, patient splitters
-│   ├── models/             # Architecture factory & trainers
-│   ├── explainability/     # Grad-CAM heatmap engine
-│   ├── evaluation/         # Clinical & ML metrics calculation
-│   ├── api/                # Flask REST API server
-│   ├── ui/                 # Streamlit web dashboard
-│   └── utils/              # Logging, seed setter, hardware auto-detector
-├── tests/                  # Pytest unit & integration tests
-├── pyproject.toml          # PEP 517 build & tool configuration
-├── requirements.txt        # Production dependencies
-├── requirements-dev.txt    # Development & test dependencies
-├── LICENSE                 # MIT License & Medical Disclaimer
-└── README.md               # Project homepage
-```
-
----
-
 ## 🚀 Quickstart Guide
 
 ### 1. Local Environment Setup
 ```bash
 # Clone repository
-git clone https://github.com/your-username/MedVision-AI.git
+git clone https://github.com/SwastikPandey1024/MedVision-AI.git
 cd MedVision-AI
 
 # Create virtual environment (Python 3.11)
@@ -105,7 +74,7 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
-### 2. Run Test Suite
+### 2. Run Unit Test Suite
 ```bash
 python -m pytest tests/
 ```

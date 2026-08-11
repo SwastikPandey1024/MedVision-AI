@@ -1,6 +1,6 @@
 {
-  "id": "swastikpandey1024/medvision-ai-kaggle-gpu",
-  "title": "MedVision-AI Kaggle GPU Training Pipeline",
+  "id": "swastikpandey004/medvision-ai-kaggle-gpu",
+  "title": "medvision-ai-kaggle-gpu",
   "code_file": "medvision_ai_kaggle_gpu.ipynb",
   "language": "python",
   "kernel_type": "notebook",
