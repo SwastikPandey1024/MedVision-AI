@@ -5,6 +5,19 @@ All notable changes to the **MedVision-AI** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-alpha] - 2026-08-11
+
+### Added
+- **Phase 3 Baseline Custom CNN Architecture & Kaggle GPU Training Pipeline**:
+  - Implemented lightweight `CustomCNNBaseline` model (`build_custom_cnn`) with 3 Conv-BN-ReLU-Pool-Dropout blocks in `src/medvision/models/baseline_cnn.py`.
+  - Implemented `DenseNet121Primary` transfer learning builder and `unfreeze_densenet_for_finetuning` with explicit `BatchNormalization` layer freeze safety in `src/medvision/models/densenet.py`.
+  - Built multi-GPU hardware distribution & mixed precision model factory in `src/medvision/models/factory.py`.
+  - Implemented `train_model` engine with class weights, `ModelCheckpoint` monitoring `val_pr_auc`, `EarlyStopping`, `ReduceLROnPlateau`, and CSV/TensorBoard loggers in `src/medvision/models/trainer.py`.
+  - Created custom metric suite (`Specificity`, `F1Score`, `PR-AUC`, `ROC-AUC`, `Precision`, `Recall`) in `src/medvision/utils/metrics.py`.
+  - Added training command-line interface script `scripts/train.py`.
+  - Documented architectural decisions in `docs/adr/ADR-009-baseline-cnn-architecture.md`.
+  - Updated unit test suite in `tests/test_models.py` (21 passed tests).
+
 ## [0.3.0-alpha] - 2026-08-11
 
 ### Added

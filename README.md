@@ -42,10 +42,10 @@ To eliminate data leakage, patients are partitioned strictly by `patient_id` usi
 ## 🗺️ 13-Phase Implementation Roadmap
 
 - [x] **Phase 0: Foundational Hardware-Aware Architecture Setup**
-- [x] **Phase 1: Dataset Acquisition & Quality Control EDA** (Current)
-- [ ] **Phase 2: Preprocessing Engine & `tf.data` Pipeline**
-- [ ] **Phase 3: Custom CNN Baseline Model**
-- [ ] **Phase 4: DenseNet121 Transfer Learning Architecture**
+- [x] **Phase 1: Dataset Acquisition & Quality Control EDA**
+- [x] **Phase 2: Preprocessing Engine & `tf.data` Pipeline**
+- [x] **Phase 3: Custom CNN Baseline & Training Engine**
+- [ ] **Phase 4: DenseNet121 Transfer Learning Fine-Tuning**
 - [ ] **Phase 5: Controlled Layer Fine-Tuning**
 - [ ] **Phase 6: Systematic Hyperparameter & Data Experiments**
 - [ ] **Phase 7: Comprehensive Evaluation & Error Analysis**
@@ -78,3 +78,16 @@ pip install -e ".[dev]"
 ```bash
 python -m pytest tests/
 ```
+
+### 3. Model Architecture Visualization (Local CPU)
+```bash
+# Visualize Custom CNN Baseline architecture (summary TXT + SVG/PNG diagram)
+$env:PYTHONPATH="src"; python scripts/visualize_model.py --architecture custom_cnn
+
+# Visualize DenseNet121 Primary architecture
+$env:PYTHONPATH="src"; python scripts/visualize_model.py --architecture densenet121
+
+# Visualize all supported architectures
+$env:PYTHONPATH="src"; python scripts/visualize_model.py --architecture all
+```
+Generated reports and SVG/PNG diagrams are saved under `artifacts/architecture/`.

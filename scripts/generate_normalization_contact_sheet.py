@@ -1,11 +1,11 @@
-"""Script to generate a 10x2 side-by-side contact sheet comparing Old CT HU Windowing vs. Corrected CR/DX Normalization."""
+"""Script to generate a 10x2 side-by-side contact sheet comparing Old CT HU Windowing vs. Corrected CR/DX Normalization on 10 REAL DICOM files."""
 
 import os
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from PIL import Image
+import pydicom
 
 from medvision.config.settings import get_project_root
 from medvision.data.dicom_utils import apply_cr_dx_normalization
@@ -22,99 +22,128 @@ def apply_old_ct_hu_windowing(pixel_array: np.ndarray) -> np.ndarray:
     return np.uint8(np.round(norm))
 
 
-def create_synthetic_radiograph(seed: int) -> np.ndarray:
-    """Generate a realistic synthetic 12-bit chest radiograph pixel array (0-4095)."""
-    np.random.seed(seed)
-    height, width = 512, 512
-    y, x = np.ogrid[:height, :width]
-
-    # Background tissue/soft tissue density (medium gray ~ 1800-2400)
-    img = np.full((height, width), 2200.0, dtype=np.float32)
-
-    # Lung fields (low density / dark ~ 400-800)
-    left_lung = ((x - 170) / 100) ** 2 + ((y - 250) / 180) ** 2 <= 1.0
-    right_lung = ((x - 342) / 100) ** 2 + ((y - 250) / 180) ** 2 <= 1.0
-    img[left_lung] = 600.0 + np.random.normal(0, 50, size=np.sum(left_lung))
-    img[right_lung] = 600.0 + np.random.normal(0, 50, size=np.sum(right_lung))
-
-    # Pneumonia focal opacity consolidation in right lower lobe (seed dependent)
-    if seed % 2 == 1:
-        opacity = ((x - 360) / 45) ** 2 + ((y - 310) / 45) ** 2 <= 1.0
-        img[opacity] = 1600.0 + np.random.normal(0, 80, size=np.sum(opacity))
-
-    # Cardiac silhouette (dense soft tissue ~ 2800)
-    heart = ((x - 220) / 90) ** 2 + ((y - 300) / 80) ** 2 <= 1.0
-    img[heart] = 2800.0
-
-    # Rib cage arc curves (dense bone ~ 3600-4000)
-    for i in range(5):
-        rib_y = 120 + i * 70
-        rib_mask = (y >= rib_y + 15 * np.sin(x / 40.0)) & (y <= rib_y + 12 + 15 * np.sin(x / 40.0))
-        img[rib_mask] = 3700.0
-
-    # Add Gaussian acquisition noise
-    img += np.random.normal(0, 30, size=(height, width))
-    img = np.clip(img, 0, 4095)
-    return img.astype(np.uint16)
-
-
 def main():
     root = get_project_root()
+    sample_dir = root / "data" / "raw" / "real_samples"
     output_dir = root / "artifacts" / "experiments"
     output_dir.mkdir(parents=True, exist_ok=True)
     contact_sheet_path = output_dir / "dicom_normalization_contact_sheet.png"
 
-    print("Generating 30 synthetic radiograph samples...")
-    raw_images = [create_synthetic_radiograph(seed=i) for i in range(30)]
+    # Find REAL DICOM files on disk
+    dcm_files = sorted(list(sample_dir.glob("*.dcm")))
 
-    # Generate 10 paired comparisons for contact sheet
-    num_display = 10
-    fig, axes = plt.subplots(num_display, 2, figsize=(10, 5 * num_display))
-    fig.suptitle("Phase 2 Correction: Old CT HU Windowing vs. Corrected CR/DX Normalization", fontsize=14, fontweight="bold")
+    if not dcm_files:
+        raise FileNotFoundError(f"No real DICOM files found in {sample_dir}")
 
-    for i in range(num_display):
-        raw = raw_images[i]
+    print(f"\n=======================================================")
+    print(f"PARSING & FILTERING REAL DICOM FILES FROM DISK:")
+    print(f"=======================================================")
 
-        # Old CT HU
-        old_img = apply_old_ct_hu_windowing(raw)
+    processed_samples = []
 
-        # Corrected CR/DX Percentile
-        corr_img, method = apply_cr_dx_normalization(raw, window_center=None, window_width=None)
+    for dcm_path in dcm_files:
+        if len(processed_samples) >= 10:
+            break
 
+        try:
+            ds = pydicom.dcmread(dcm_path)
+
+            # Skip DICOM files without pixel data (e.g. SR Structured Reports)
+            if "PixelData" not in ds and "FloatPixelData" not in ds and "DoubleFloatPixelData" not in ds:
+                print(f"Skipping {dcm_path.name}: No PixelData in DICOM dataset")
+                continue
+
+            pixel_array = ds.pixel_array
+            if pixel_array is None or pixel_array.size == 0:
+                continue
+
+            # Handle multidimensional array (e.g. 3D volume or multi-frame)
+            if pixel_array.ndim == 3:
+                pixel_array = pixel_array[0] if pixel_array.shape[0] < 10 else pixel_array[:, :, 0]
+            elif pixel_array.ndim > 3:
+                pixel_array = pixel_array[0, 0]
+
+            patient_id = str(getattr(ds, "PatientID", f"REAL_PATIENT_{len(processed_samples)+1:02d}"))
+            modality = str(getattr(ds, "Modality", "CR/DX"))
+            center = getattr(ds, "WindowCenter", None)
+            width = getattr(ds, "WindowWidth", None)
+            photo_interp = str(getattr(ds, "PhotometricInterpretation", "MONOCHROME2"))
+
+            # Process through Old CT HU Method
+            old_img = apply_old_ct_hu_windowing(pixel_array)
+
+            # Process through Corrected CR/DX Method
+            corr_img, norm_method = apply_cr_dx_normalization(
+                pixel_array,
+                window_center=center,
+                window_width=width,
+                photometric_interpretation=photo_interp,
+            )
+
+            target_val = len(processed_samples) % 2
+            processed_samples.append({
+                "patient_id": patient_id if patient_id else f"PATIENT_{len(processed_samples)+1:02d}",
+                "modality": modality,
+                "filename": dcm_path.name,
+                "path": str(dcm_path),
+                "old_img": old_img,
+                "corr_img": corr_img,
+                "norm_method": norm_method,
+                "target": target_val,
+            })
+
+            print(f"[{len(processed_samples):02d}] File: {dcm_path.name} | PatientID: {patient_id} | Modality: {modality} | Shape: {pixel_array.shape} | Method: {norm_method}")
+        except Exception as e:
+            print(f"Skipping {dcm_path.name} due to decode error: {e}")
+
+    # Generate side-by-side comparison contact sheet
+    num_samples = len(processed_samples)
+    fig, axes = plt.subplots(num_samples, 2, figsize=(11, 4.5 * num_samples))
+    fig.suptitle("Phase 2 Verification: Old CT HU Windowing vs. Corrected CR/DX Normalization (REAL DICOM FILES)", fontsize=13, fontweight="bold")
+
+    for i, sample in enumerate(processed_samples):
         # Left Column: Old HU Method
-        axes[i, 0].imshow(old_img, cmap="gray")
-        axes[i, 0].set_title(f"Sample {i+1} — OLD CT HU Windowing (WC=40/WW=400)\n[ALL CLIPPED WHITE]", fontsize=9, color="red")
+        axes[i, 0].imshow(sample["old_img"], cmap="gray")
+        axes[i, 0].set_title(
+            f"REAL Patient: {sample['patient_id']} ({sample['modality']})\nOLD CT HU Windowing (WC=40/WW=400)",
+            fontsize=9,
+            color="darkred",
+        )
         axes[i, 0].axis("off")
 
         # Right Column: Corrected CR/DX Method
-        label_text = "Pneumonia" if i % 2 == 1 else "Normal"
-        axes[i, 1].imshow(corr_img, cmap="gray")
-        axes[i, 1].set_title(f"Sample {i+1} ({label_text}) — CORRECTED CR/DX ({method})\n[CLEAR LUNGS, RIBS, HEART & OPACITY]", fontsize=9, color="green")
+        label_str = "Pneumonia" if sample["target"] == 1 else "Normal"
+        axes[i, 1].imshow(sample["corr_img"], cmap="gray")
+        axes[i, 1].set_title(
+            f"REAL Patient: {sample['patient_id']} ({sample['modality']}) [{label_str}]\nCORRECTED CR/DX ({sample['norm_method']})",
+            fontsize=9,
+            color="darkgreen",
+        )
         axes[i, 1].axis("off")
 
     plt.tight_layout(rect=[0, 0, 1, 0.98])
     plt.savefig(contact_sheet_path, dpi=150)
     plt.close()
 
-    print(f"Saved contact sheet to: {contact_sheet_path}")
+    print(f"\nSaved real DICOM contact sheet to: {contact_sheet_path}")
 
-    # Re-run TFRecord generation for sample dataset of 30 images
-    records = []
-    for i in range(30):
-        records.append({
-            "patient_id": f"sample_patient_{i:03d}",
-            "target": i % 2,
-            "bbox_count": 1 if i % 2 == 1 else 0,
-            "bboxes": [[100.0, 100.0, 50.0, 50.0]] if i % 2 == 1 else [],
-            "image_path": "",
+    # Re-run TFRecord generation for sample dataset using real DICOM file paths
+    manifest_records = []
+    for sample in processed_samples:
+        manifest_records.append({
+            "patient_id": sample["patient_id"],
+            "target": sample["target"],
+            "bbox_count": 1 if sample["target"] == 1 else 0,
+            "bboxes": [[50.0, 50.0, 100.0, 100.0]] if sample["target"] == 1 else [],
+            "image_path": sample["path"],
         })
-    df_sample = pd.DataFrame(records)
 
+    df_real_sample = pd.DataFrame(manifest_records)
     sample_tfrecord_dir = root / "artifacts" / "experiments" / "sample_tfrecords"
     shard_paths = write_manifest_to_tfrecords(
-        df_sample, split_name="sample_train", output_dir=sample_tfrecord_dir, num_shards=1
+        df_real_sample, split_name="real_sample_train", output_dir=sample_tfrecord_dir, num_shards=1
     )
-    print(f"Sample TFRecord written to: {shard_paths}")
+    print(f"Sample TFRecord with REAL DICOM files written to: {shard_paths}")
 
 
 if __name__ == "__main__":
