@@ -32,6 +32,7 @@ def create_tf_example(
     bbox_count: int,
     bboxes: List[List[float]],
     image_bytes: bytes,
+    norm_method: str = "tag_voi_lut",
 ) -> tf.train.Example:
     """Serialize a single patient sample into a tf.train.Example protocol buffer.
 
@@ -41,6 +42,7 @@ def create_tf_example(
         bbox_count: Number of bounding boxes.
         bboxes: List of bounding box coordinate lists.
         image_bytes: Encoded JPEG image bytes.
+        norm_method: Normalization method string ('tag_voi_lut' vs 'percentile_fallback').
 
     Returns:
         tf.train.Example message object.
@@ -51,6 +53,7 @@ def create_tf_example(
         "bbox_count": _int64_feature(bbox_count),
         "bboxes": _bytes_feature(json.dumps(bboxes).encode("utf-8")),
         "image_bytes": _bytes_feature(image_bytes),
+        "norm_method": _bytes_feature(norm_method.encode("utf-8")),
     }
     return tf.train.Example(features=tf.train.Features(feature=feature))
 
@@ -84,6 +87,8 @@ def write_manifest_to_tfrecords(
     records_per_shard = int(np.ceil(len(df) / num_shards))
     shard_paths: List[str] = []
 
+    method_counts: Dict[str, int] = {}
+
     for shard_idx in range(num_shards):
         start_idx = shard_idx * records_per_shard
         end_idx = min((shard_idx + 1) * records_per_shard, len(df))
@@ -102,14 +107,16 @@ def write_manifest_to_tfrecords(
                 target = int(row["target"])
                 bbox_count = int(row.get("bbox_count", 0))
                 bboxes = row.get("bboxes", [])
-                image_path = row.get("image_path", "")
+                image_path = str(row.get("image_path", ""))
 
-                # Read and process image
+                # Read and process DICOM image with CR/DX VOI LUT or percentile fallback
                 if os.path.exists(image_path) and image_path.endswith(".dcm"):
-                    img_array = read_and_process_dicom(image_path, target_size=target_size)
+                    img_array, norm_method = read_and_process_dicom(image_path, target_size=target_size)
                 else:
-                    # Synthetic / RGB array fallback for fast dev testing
                     img_array = np.zeros((*target_size, 3), dtype=np.uint8)
+                    norm_method = "synthetic_fallback"
+
+                method_counts[norm_method] = method_counts.get(norm_method, 0) + 1
 
                 # Encode to JPEG bytes stream
                 pil_img = Image.fromarray(img_array)
@@ -117,8 +124,8 @@ def write_manifest_to_tfrecords(
                 pil_img.save(buf, format="JPEG", quality=95)
                 image_bytes = buf.getvalue()
 
-                example = create_tf_example(patient_id, target, bbox_count, bboxes, image_bytes)
+                example = create_tf_example(patient_id, target, bbox_count, bboxes, image_bytes, norm_method)
                 writer.write(example.SerializeToString())
 
-    logger.info(f"Wrote {len(df)} records into {len(shard_paths)} TFRecord shards for split '{split_name}'.")
+    logger.info(f"Wrote {len(df)} records into {len(shard_paths)} TFRecord shards for split '{split_name}'. Method audit: {method_counts}")
     return shard_paths

@@ -1,7 +1,7 @@
 """Data ingestion, validation, splitting, preprocessing, and TFRecord modules."""
 
 from medvision.data.dataset import find_dataset_root, parse_rsna_manifest
-from medvision.data.dicom_utils import apply_dicom_windowing, read_and_process_dicom
+from medvision.data.dicom_utils import apply_cr_dx_normalization, read_and_process_dicom
 from medvision.data.eda import generate_eda_report
 from medvision.data.local_dev_loader import load_dev_sample_batch
 from medvision.data.preprocessing import (
@@ -25,7 +25,7 @@ __all__ = [
     "verify_zero_patient_leakage",
     "create_development_subset",
     "generate_eda_report",
-    "apply_dicom_windowing",
+    "apply_cr_dx_normalization",
     "read_and_process_dicom",
     "create_tf_example",
     "write_manifest_to_tfrecords",

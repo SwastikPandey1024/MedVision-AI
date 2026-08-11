@@ -39,15 +39,17 @@ def load_dev_sample_batch(
 
         # Decode image using dicom_utils / PIL fallback
         if path and path.endswith(".dcm"):
-            img = read_and_process_dicom(path, target_size=target_size)
+            img, norm_method = read_and_process_dicom(path, target_size=target_size)
         else:
             img = np.zeros((*target_size, 3), dtype=np.uint8)
+            norm_method = "synthetic_fallback"
 
         images.append(img.astype(np.float32) / 255.0)
         labels.append(target)
         metadata.append({
             "patient_id": row["patient_id"],
             "bbox_count": row.get("bbox_count", 0),
+            "norm_method": norm_method,
         })
 
     images_arr = np.array(images, dtype=np.float32)
