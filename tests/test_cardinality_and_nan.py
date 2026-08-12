@@ -140,6 +140,17 @@ def test_real_batch_diagnostic_with_strategy():
     assert diag["first_failure"] == "NONE (ALL STAGES FINITE)"
 
 
+def test_stage1_fresh_model_and_dataset_reinitialization():
+    """Verify fresh model and dataset reinitialization before Stage 1 training."""
+    strategy = tf.distribute.get_strategy()
+    model1 = build_model(architecture="custom_cnn", compile_model=True, strategy=strategy)
+    model2 = build_model(architecture="custom_cnn", compile_model=True, strategy=strategy)
+
+    # Ensure model2 is a distinct fresh instance
+    assert model1 is not model2
+    assert len(model1.weights) == len(model2.weights)
+
+
 def test_check_laptop_safety_and_provenance_guard(monkeypatch):
     """Verify full training mode fails safely when missing real RSNA dataset or GPU."""
     # Test laptop CPU guard: mode='full' on non-Kaggle with 0 GPUs

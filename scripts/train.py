@@ -79,8 +79,8 @@ def parse_args():
         "--stage",
         type=str,
         default="diagnostic",
-        choices=["diagnostic", "stage1", "stage2", "all"],
-        help="Training stage to execute: 'diagnostic' (default: 1-batch diagnostic + 10-batch benchmark and stop), 'stage1', 'stage2', or 'all'.",
+        choices=["diagnostic", "stage1_diagnostic", "stage1", "stage2", "all"],
+        help="Training stage to execute: 'diagnostic' (1-batch + 10-batch benchmark and stop), 'stage1_diagnostic' (10-batch Stage-1 audit and stop), 'stage1', 'stage2', or 'all'.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -411,7 +411,7 @@ def main():
         logger.error("CRITICAL BENCHMARK FAILURE: Non-finite loss/predictions/gradients detected during 10-batch benchmark!")
         sys.exit(1)
 
-    if args.stage == "diagnostic":
+    if args.stage in ["diagnostic", "stage1_diagnostic"]:
         logger.info("=" * 75)
         logger.info("DIAGNOSTIC & BENCHMARK COMPLETED SUCCESSFULLY.")
         logger.info(f"EXPECTED TRAIN STEPS: {expected_train_steps}")
@@ -429,6 +429,33 @@ def main():
     logger.info("=" * 75)
     logger.info("PHASE E: DenseNet121 Stage 1 Head Training (Backbone Frozen)")
     logger.info("=" * 75)
+
+    # Re-initialize fresh model and fresh dataset iterators for Stage 1 training
+    # to eliminate any state mutation or dataset iterator exhaustion from preflight diagnostics.
+    logger.info("Re-initializing fresh model and fresh dataset iterators for Stage 1 training...")
+    if args.mode == "full":
+        train_ds, val_ds, _ = create_real_rsna_dataset(
+            df_train=df_train,
+            df_val=df_val,
+            df_test=df_test,
+            batch_size=global_batch_size,
+            target_size=(224, 224),
+        )
+    else:
+        train_ds, val_ds, _ = load_dev_subset_datasets(
+            batch_size=global_batch_size,
+            target_size=(224, 224),
+        )
+
+    with strategy.scope():
+        model = build_model(
+            architecture=args.architecture,
+            input_shape=(224, 224, 3),
+            num_classes=1,
+            config=config,
+            compile_model=True,
+            strategy=strategy,
+        )
 
     stage1_exp_name = f"{args.architecture}_stage1_{args.mode}"
     stage1_ckpt_path = str(root / "artifacts" / "experiments" / f"{stage1_exp_name}_best.keras")
