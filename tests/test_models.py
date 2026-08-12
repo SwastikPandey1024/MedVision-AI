@@ -56,6 +56,20 @@ def test_model_factory():
         build_model(architecture="invalid_arch")
 
 
+def test_strategy_reuse_in_build_model():
+    """Verify build_model reuses supplied distribution strategy without re-instantiation."""
+    custom_strategy = tf.distribute.get_strategy()
+
+    with custom_strategy.scope():
+        model = build_model(
+            architecture="custom_cnn",
+            compile_model=True,
+            strategy=custom_strategy,
+        )
+
+    assert model.output_shape == (None, 1)
+
+
 def test_compute_training_class_weights():
     """Verify class weight calculation on training data only."""
     df_train = pd.DataFrame({

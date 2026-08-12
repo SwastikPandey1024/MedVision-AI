@@ -122,6 +122,7 @@ def main():
             compile_model=True,
             mixed_precision=args.mixed_precision,
             config=config,
+            strategy=strategy,
         )
 
     total_params = model.count_params()
@@ -147,6 +148,9 @@ def main():
         logger.info(f"GPU Device Names               : {gpu_names}")
         logger.info(f"Strategy Type                  : {strategy.__class__.__name__}")
         logger.info(f"strategy.num_replicas_in_sync  : {strategy.num_replicas_in_sync}")
+        logger.info(f"Strategy object identity / reuse: PASS (id={id(strategy)})")
+        expected_replicas = gpu_count if gpu_count > 0 else 1
+        assert strategy.num_replicas_in_sync == expected_replicas, f"Expected {expected_replicas} replicas, got {strategy.num_replicas_in_sync}"
         logger.info(f"Mixed Precision Policy         : {policy_name}")
         logger.info(f"Model Name                     : {model.name}")
         logger.info(f"Model Output Shape             : {model.output_shape}")

@@ -74,6 +74,7 @@ def build_model(
     compile_model: bool = True,
     mixed_precision: bool = False,
     config: Optional[Dict[str, Any]] = None,
+    strategy: Optional[tf.distribute.Strategy] = None,
 ) -> keras.Model:
     """Build and compile classification model based on selected architecture.
 
@@ -85,6 +86,7 @@ def build_model(
         compile_model: If True, compiles model with loss, optimizer, and metrics.
         mixed_precision: If True, configures mixed_float16 policy.
         config: Master configuration dictionary.
+        strategy: Optional pre-existing tf.distribute.Strategy instance.
 
     Returns:
         Keras Model instance (compiled if compile_model=True).
@@ -96,10 +98,15 @@ def build_model(
     # Configure mixed precision policy
     configure_mixed_precision(enable=mixed_precision)
 
-    # Detect multi-GPU strategy
-    strategy, gpu_count = get_distribution_strategy()
+    # Use supplied strategy instance if provided; do NOT re-instantiate MirroredStrategy
+    if strategy is not None:
+        active_strategy = strategy
+        logger.info(f"Using supplied distribution strategy: {active_strategy.__class__.__name__} (id={id(active_strategy)})")
+    else:
+        active_strategy, _ = get_distribution_strategy()
+        logger.info(f"Fallback strategy detected: {active_strategy.__class__.__name__} (id={id(active_strategy)})")
 
-    with strategy.scope():
+    with active_strategy.scope():
         if architecture == "custom_cnn":
             init_filters = 32
             dropout_rate = 0.3
