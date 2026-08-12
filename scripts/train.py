@@ -250,94 +250,35 @@ def main():
         logger.info(f"Model Output Shape             : {model.output_shape}")
 
         with strategy.scope():
-            if strategy.num_replicas_in_sync > 1 and hasattr(strategy, "experimental_distribute_dataset"):
-                dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
-                dist_val_ds = strategy.experimental_distribute_dataset(val_ds)
-            else:
-                dist_train_ds = train_ds
-                dist_val_ds = val_ds
+            # 1. Keras-native distributed model.fit() execution
+            history = model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=1,
+                steps_per_epoch=4,
+                validation_steps=2,
+                class_weight=class_weights,
+                verbose=1,
+            )
 
-            # 1. Validation steps (2 steps)
-            val_iter = iter(dist_val_ds)
-            for v_step in range(2):
-                try:
-                    v_batch = next(val_iter)
-                    vx_batch, vy_batch = v_batch[0], v_batch[1]
-                except StopIteration:
-                    break
+        # 2. Verify metrics from actual training history
+        train_loss = history.history["loss"][-1]
+        val_loss = history.history["val_loss"][-1]
+        assert not math.isnan(train_loss) and not math.isinf(train_loss), "Training loss is NaN/Inf!"
+        assert not math.isnan(val_loss) and not math.isinf(val_loss), "Validation loss is NaN/Inf!"
+        logger.info(f"Smoke Test Training Loss       : {train_loss:.4f} (finite = True)")
+        logger.info(f"Smoke Test Validation Loss     : {val_loss:.4f} (finite = True)")
 
-                if strategy.num_replicas_in_sync > 1 and hasattr(strategy, "run"):
-                    v_preds_dist = strategy.run(lambda x: model(x, training=False), args=(vx_batch,))
-                    if hasattr(v_preds_dist, "values"):
-                        v_preds = tf.concat(v_preds_dist.values, axis=0)
-                    else:
-                        v_preds = v_preds_dist
-
-                    v_loss_dist = strategy.run(lambda x, y, p: model.compute_loss(x, y, p), args=(vx_batch, vy_batch, v_preds_dist))
-                    v_loss_val = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, v_loss_dist, axis=None))
-                else:
-                    v_preds = model(vx_batch, training=False)
-                    v_loss_val = float(model.compute_loss(vx_batch, vy_batch, v_preds))
-
-                logger.info(f"Validation Step {v_step+1}/2 Loss         : {v_loss_val:.4f}")
-                assert not math.isnan(v_loss_val) and not math.isinf(v_loss_val), "Val Loss is NaN/Inf!"
-
-            # 2. Replica-local training step with @tf.function decorator
-            @tf.function
-            def replica_train_step(x, y):
-                with tf.GradientTape() as tape:
-                    y_pred = model(x, training=True)
-                    loss = model.compute_loss(x, y, y_pred)
-                grads = tape.gradient(loss, model.trainable_variables)
-                model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
-                return loss, y_pred
-
-            train_iter = iter(dist_train_ds)
-            for step in range(4):
-                try:
-                    batch = next(train_iter)
-                    x_batch, y_batch = batch[0], batch[1]
-                except StopIteration:
-                    break
-
-                if strategy.num_replicas_in_sync > 1 and hasattr(strategy, "run"):
-                    per_replica_loss, per_replica_preds = strategy.run(
-                        replica_train_step,
-                        args=(x_batch, y_batch),
-                    )
-                    loss_f = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica_loss, axis=None))
-
-                    if hasattr(per_replica_preds, "values"):
-                        predictions = tf.concat(per_replica_preds.values, axis=0)
-                    else:
-                        predictions = per_replica_preds
-
-                    if hasattr(x_batch, "values"):
-                        local_batch_shape = x_batch.values[0].shape
-                        global_batch_size = sum(v.shape[0] for v in x_batch.values)
-                    else:
-                        local_batch_shape = x_batch.shape
-                        global_batch_size = x_batch.shape[0]
-                else:
-                    loss_tensor, predictions = replica_train_step(x_batch, y_batch)
-                    loss_f = float(loss_tensor)
-                    local_batch_shape = x_batch.shape
-                    global_batch_size = x_batch.shape[0]
-
-                preds_finite = bool(tf.reduce_all(tf.math.is_finite(predictions)))
-                loss_finite = not math.isnan(loss_f) and not math.isinf(loss_f)
-
-                logger.info(f"Training Step {step+1}/4")
-                logger.info(f"  Global Training Batch Size   : {global_batch_size}")
-                logger.info(f"  Local Replica Batch Shape    : {local_batch_shape}")
-                logger.info(f"  Loss Value                   : {loss_f:.4f}")
-                logger.info(f"  Loss Finiteness              : {loss_finite}")
-                logger.info(f"  Prediction Finiteness        : {preds_finite}")
-                logger.info(f"  Predictions Output Shape     : {predictions.shape}")
-
-                assert loss_finite, f"Loss is NaN/Inf at step {step+1}!"
-                assert preds_finite, f"Predictions contain NaN/Inf at step {step+1}!"
-                assert predictions.shape == (global_batch_size, 1), f"Expected predictions shape ({global_batch_size}, 1), got {predictions.shape}"
+        # 3. Post-fit numerical prediction verification
+        for batch_x, _ in val_ds.take(1):
+            preds = model.predict(batch_x, verbose=0)
+            global_batch_size = batch_x.shape[0]
+            preds_finite = bool(tf.reduce_all(tf.math.is_finite(preds)))
+            assert preds_finite, "Model predictions contain NaN/Inf!"
+            assert preds.shape == (global_batch_size, 1), f"Expected predictions shape ({global_batch_size}, 1), got {preds.shape}"
+            logger.info(f"Prediction Finiteness        : {preds_finite}")
+            logger.info(f"Predictions Output Shape     : {preds.shape}")
+            break
 
         # 3. Verify CSVLogger / TensorBoard callback initialization
         from keras.callbacks import CSVLogger, TensorBoard
