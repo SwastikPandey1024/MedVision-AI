@@ -86,10 +86,23 @@ def parse_args():
 def check_laptop_safety_and_provenance(mode: str, gpu_count: int) -> bool:
     """Verify hardware, Kaggle environment, and RSNA dataset provenance."""
     is_kaggle = os.path.exists("/kaggle/working") or os.path.exists("/kaggle/input")
-    rsna_dataset_path = Path("/kaggle/input/rsna-pneumonia-detection-challenge")
-    real_rsna_dataset_exists = rsna_dataset_path.exists()
+    
+    from medvision.data.dataset import find_dataset_root
+    ds_root = find_dataset_root()
+    labels_file = ds_root / "stage_2_train_labels.csv"
+    if not labels_file.exists():
+        labels_file = ds_root / "stage_1_train_labels.csv"
+    if not labels_file.exists():
+        matches = list(ds_root.glob("*train_labels.csv"))
+        if len(matches) > 0:
+            labels_file = matches[0]
+
+    real_rsna_dataset_exists = labels_file.exists()
 
     logger.info(f"REAL_RSNA_DATASET = {'YES' if real_rsna_dataset_exists else 'NO'}")
+    if real_rsna_dataset_exists:
+        logger.info(f"Dataset Root Resolved: {ds_root}")
+        logger.info(f"Labels File Resolved : {labels_file}")
 
     if mode == "full":
         if not is_kaggle:
@@ -108,9 +121,13 @@ def check_laptop_safety_and_provenance(mode: str, gpu_count: int) -> bool:
             sys.exit(1)
 
         if not real_rsna_dataset_exists:
+            kaggle_input = Path("/kaggle/input")
+            attached_items = [str(p) for p in kaggle_input.glob("*")] if kaggle_input.exists() else []
             logger.error("=" * 75)
             logger.error("RSNA DATASET PROVENANCE GUARD ACTIVATED!")
-            logger.error(f"RSNA dataset path '{rsna_dataset_path}' not found! Synthetic fallback is FORBIDDEN for full mode.")
+            logger.error(f"RSNA dataset labels file not found at '{ds_root}'!")
+            logger.error(f"Mounted items under /kaggle/input: {attached_items}")
+            logger.error("Synthetic fallback is FORBIDDEN for full mode.")
             logger.error("=" * 75)
             sys.exit(1)
 
@@ -197,19 +214,34 @@ def main():
         )
         epochs = args.epochs
     else:
-        logger.info("Full mode selected: Loading full RSNA TFRecord data pipelines...")
-        from medvision.data.preprocessing import build_tfrecord_dataset
-        tfrecord_dir = root / "data" / "processed" / "tfrecords"
-        train_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("train_*.tfrecord")), batch_size=args.batch_size, is_training=True)
-        val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=args.batch_size, is_training=False)
-        test_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("test_*.tfrecord")), batch_size=args.batch_size, is_training=False)
+        logger.info("Full mode selected: Resolving RSNA dataset root & data pipelines...")
+        from medvision.data.dataset import find_dataset_root, parse_rsna_manifest
+        from medvision.data.splits import create_patient_aware_splits
+        from medvision.data.local_dev_loader import load_dev_subset_datasets
 
-        manifest_csv = root / "data" / "metadata" / "manifest.csv"
-        if manifest_csv.exists():
-            df_manifest = pd.read_csv(manifest_csv)
-            df_train = df_manifest[df_manifest["split"] == "train"] if "split" in df_manifest.columns else df_manifest
+        ds_root = find_dataset_root()
+        tfrecord_dir = root / "data" / "processed" / "tfrecords"
+        train_shards = list(tfrecord_dir.glob("train_*.tfrecord"))
+
+        if len(train_shards) > 0:
+            from medvision.data.preprocessing import build_tfrecord_dataset
+            train_ds = build_tfrecord_dataset(train_shards, batch_size=args.batch_size, is_training=True)
+            val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=args.batch_size, is_training=False)
+            test_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("test_*.tfrecord")), batch_size=args.batch_size, is_training=False)
+
+            manifest_csv = root / "data" / "metadata" / "manifest.csv"
+            if manifest_csv.exists():
+                df_manifest = pd.read_csv(manifest_csv)
+                df_train = df_manifest[df_manifest["split"] == "train"] if "split" in df_manifest.columns else df_manifest
+            else:
+                df_manifest = parse_rsna_manifest(ds_root)
+                df_train, _, _ = create_patient_aware_splits(df_manifest)
         else:
-            df_train = None
+            logger.info(f"TFRecord shards not found at '{tfrecord_dir}'. Loading RSNA dataset pipelines directly from '{ds_root}'...")
+            train_ds, val_ds, test_ds, df_train, df_val, df_test = load_dev_subset_datasets(
+                sample_fraction=1.0,
+                batch_size=args.batch_size,
+            )
 
         epochs = args.epochs
 
