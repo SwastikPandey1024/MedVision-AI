@@ -442,16 +442,15 @@ def main():
 
         logger.info("Re-initializing fresh model and fresh dataset iterators for Experiment B model.fit()...")
         if args.mode == "full":
-            train_ds, val_ds, _ = create_real_rsna_dataset(
-                df_train=df_train,
-                df_val=df_val,
-                df_test=df_test,
-                batch_size=global_batch_size,
-                target_size=(224, 224),
-            )
+            if len(train_shards) > 0:
+                train_ds = build_tfrecord_dataset(train_shards, batch_size=per_replica_batch_size, is_training=True, repeat=False)
+                val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=per_replica_batch_size, is_training=False, repeat=False)
+            else:
+                train_ds = create_real_rsna_dataset(df_train, batch_size=per_replica_batch_size, is_training=True)
+                val_ds = create_real_rsna_dataset(df_val, batch_size=per_replica_batch_size, is_training=False)
         else:
             train_ds, val_ds, _ = load_dev_subset_datasets(
-                batch_size=global_batch_size,
+                batch_size=per_replica_batch_size,
                 target_size=(224, 224),
             )
 
@@ -545,16 +544,15 @@ def main():
     # to eliminate any state mutation or dataset iterator exhaustion from preflight diagnostics.
     logger.info("Re-initializing fresh model and fresh dataset iterators for Stage 1 training...")
     if args.mode == "full":
-        train_ds, val_ds, _ = create_real_rsna_dataset(
-            df_train=df_train,
-            df_val=df_val,
-            df_test=df_test,
-            batch_size=global_batch_size,
-            target_size=(224, 224),
-        )
+        if len(train_shards) > 0:
+            train_ds = build_tfrecord_dataset(train_shards, batch_size=per_replica_batch_size, is_training=True, repeat=False)
+            val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=per_replica_batch_size, is_training=False, repeat=False)
+        else:
+            train_ds = create_real_rsna_dataset(df_train, batch_size=per_replica_batch_size, is_training=True)
+            val_ds = create_real_rsna_dataset(df_val, batch_size=per_replica_batch_size, is_training=False)
     else:
         train_ds, val_ds, _ = load_dev_subset_datasets(
-            batch_size=global_batch_size,
+            batch_size=per_replica_batch_size,
             target_size=(224, 224),
         )
 
