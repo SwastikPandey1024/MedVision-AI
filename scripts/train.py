@@ -15,6 +15,7 @@ import sys
 import os
 import time
 import math
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
@@ -80,8 +81,8 @@ def parse_args():
         "--stage",
         type=str,
         default="diagnostic",
-        choices=["diagnostic", "stage1_diagnostic", "exp_a", "exp_b", "stage1", "stage2", "all"],
-        help="Training stage to execute: 'diagnostic', 'stage1_diagnostic', 'exp_a' (fit ONLY), 'exp_b' (diagnostic + fit), 'stage1', 'stage2', or 'all'.",
+        choices=["diagnostic", "stage1_diagnostic", "exp_a", "exp_b", "exp_c", "stage1", "stage2", "all"],
+        help="Training stage to execute: 'diagnostic', 'stage1_diagnostic', 'exp_a' (fit ONLY), 'exp_b' (in-process reset), 'exp_c' (subprocess preflight + clean fit), 'stage1', 'stage2', or 'all'.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -227,6 +228,40 @@ def run_10_batch_benchmark(
     print("=" * 70 + "\n")
 
     return sec_per_step, est_epoch_min, all_finite
+
+
+def run_isolated_preflight_subprocess(args) -> bool:
+    """Execute preflight diagnostic and benchmark in an isolated subprocess boundary."""
+    script_path = os.path.abspath(__file__)
+    cmd = [
+        sys.executable,
+        script_path,
+        "--mode", args.mode,
+        "--stage", "diagnostic",
+        "--architecture", args.architecture,
+        "--batch-size", str(args.batch_size),
+    ]
+    if args.mixed_precision:
+        cmd.append("--mixed-precision")
+
+    logger.info("=" * 75)
+    logger.info("LAUNCHING ISOLATED PREFLIGHT SUBPROCESS BOUNDARY...")
+    logger.info(f"Subprocess Command: {' '.join(cmd)}")
+    logger.info("=" * 75)
+
+    env = os.environ.copy()
+    src_dir = str(get_project_root() / "src")
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = src_dir
+
+    res = subprocess.run(cmd, env=env)
+    if res.returncode != 0:
+        logger.error(f"ISOLATED PREFLIGHT SUBPROCESS FAILED with exit code {res.returncode}")
+        return False
+    logger.info("ISOLATED PREFLIGHT SUBPROCESS PASSED 100%. Process state reset.")
+    return True
 
 
 def main():
@@ -488,6 +523,45 @@ def main():
         logger.info("=" * 75)
         logger.info(f"EXPERIMENT B RESULT: train_loss={loss_end:.4f} | val_loss={val_loss_end:.4f}")
         logger.info(f"EXPERIMENT B STATUS: {'PASS' if math.isfinite(loss_end) and math.isfinite(val_loss_end) else 'FAIL (NaN)'}")
+        logger.info("=" * 75)
+        return
+
+    if args.stage == "exp_c":
+        logger.info("=" * 75)
+        logger.info("EXPERIMENT C: ISOLATED SUBPROCESS PREFLIGHT + CLEAN PROCESS model.fit()")
+        logger.info("=" * 75)
+
+        # Step 1: Run isolated preflight in a subprocess boundary
+        success = run_isolated_preflight_subprocess(args)
+        if not success:
+            logger.error("EXPERIMENT C FAILED during preflight subprocess.")
+            sys.exit(1)
+
+        # Step 2: Now run model.fit on a completely fresh model in a clean process state
+        logger.info("Executing 10-batch model.fit() in clean process state...")
+        callbacks = build_callbacks(
+            checkpoint_filepath=str(root / "artifacts" / "experiments" / "exp_c_best.keras"),
+            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "exp_c"),
+            csv_log_path=str(root / "artifacts" / "experiments" / "exp_c_history.csv"),
+            monitor_metric="val_pr_auc",
+            mode="max",
+        )
+        with strategy.scope():
+            history = model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=1,
+                steps_per_epoch=10,
+                validation_steps=3,
+                class_weight=class_weights,
+                callbacks=callbacks,
+                verbose=1,
+            )
+        loss_end = history.history["loss"][-1]
+        val_loss_end = history.history["val_loss"][-1]
+        logger.info("=" * 75)
+        logger.info(f"EXPERIMENT C RESULT: train_loss={loss_end:.4f} | val_loss={val_loss_end:.4f}")
+        logger.info(f"EXPERIMENT C STATUS: {'PASS' if math.isfinite(loss_end) and math.isfinite(val_loss_end) else 'FAIL (NaN)'}")
         logger.info("=" * 75)
         return
 

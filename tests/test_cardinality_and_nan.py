@@ -152,7 +152,7 @@ def test_stage1_fresh_model_and_dataset_reinitialization():
 
 
 def test_train_script_stage_choices_include_exp_a_and_exp_b():
-    """Verify parse_args contains exp_a and exp_b in --stage choices."""
+    """Verify parse_args contains exp_a, exp_b, exp_c in --stage choices."""
     from scripts.train import parse_args
     import sys
 
@@ -164,6 +164,10 @@ def test_train_script_stage_choices_include_exp_a_and_exp_b():
     sys.argv = ["train.py", "--stage", "exp_b"]
     args_b = parse_args()
     assert args_b.stage == "exp_b"
+
+    sys.argv = ["train.py", "--stage", "exp_c"]
+    args_c = parse_args()
+    assert args_c.stage == "exp_c"
 
 
 def test_train_script_help_string_does_not_raise_error():
