@@ -105,3 +105,7 @@ def create_tfrecord_dataset(
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
     return dataset
+
+
+# Alias for backward compatibility across training scripts
+build_tfrecord_dataset = create_tfrecord_dataset
