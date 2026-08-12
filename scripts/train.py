@@ -296,6 +296,8 @@ def main():
                     loss_tensor, grads_finite, predictions = replica_train_step(x_batch, y_batch)
                     loss_f = float(loss_tensor)
 
+                preds_finite = bool(tf.reduce_all(tf.math.is_finite(predictions)))
+
                 logger.info(f"Training Step {step+1}/4")
                 logger.info(f"  Training Batch Shape         : {x_batch.shape}")
                 logger.info(f"  Loss Value                   : {loss_f:.4f}")
