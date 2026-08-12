@@ -1,6 +1,6 @@
 """Experiment reproducibility tracking and manifest logging engine for MedVision-AI."""
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, List
 from pathlib import Path
 import json
 import datetime
