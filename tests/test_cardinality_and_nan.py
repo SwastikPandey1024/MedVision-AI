@@ -151,6 +151,21 @@ def test_stage1_fresh_model_and_dataset_reinitialization():
     assert len(model1.weights) == len(model2.weights)
 
 
+def test_train_script_stage_choices_include_exp_a_and_exp_b():
+    """Verify parse_args contains exp_a and exp_b in --stage choices."""
+    from scripts.train import parse_args
+    import sys
+
+    # Mock command line arguments
+    sys.argv = ["train.py", "--stage", "exp_a"]
+    args_a = parse_args()
+    assert args_a.stage == "exp_a"
+
+    sys.argv = ["train.py", "--stage", "exp_b"]
+    args_b = parse_args()
+    assert args_b.stage == "exp_b"
+
+
 def test_check_laptop_safety_and_provenance_guard(monkeypatch):
     """Verify full training mode fails safely when missing real RSNA dataset or GPU."""
     # Test laptop CPU guard: mode='full' on non-Kaggle with 0 GPUs

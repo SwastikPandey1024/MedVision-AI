@@ -79,8 +79,8 @@ def parse_args():
         "--stage",
         type=str,
         default="diagnostic",
-        choices=["diagnostic", "stage1_diagnostic", "stage1", "stage2", "all"],
-        help="Training stage to execute: 'diagnostic' (1-batch + 10-batch benchmark and stop), 'stage1_diagnostic' (10-batch Stage-1 audit and stop), 'stage1', 'stage2', or 'all'.",
+        choices=["diagnostic", "stage1_diagnostic", "exp_a", "exp_b", "stage1", "stage2", "all"],
+        help="Training stage to execute: 'diagnostic', 'stage1_diagnostic', 'exp_a' (fit ONLY), 'exp_b' (diagnostic + fit), 'stage1', 'stage2', or 'all'.",
     )
     parser.add_argument(
         "--smoke-test",
