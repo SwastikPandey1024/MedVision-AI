@@ -17,38 +17,32 @@ def find_dataset_root() -> Path:
     Returns:
         Path object pointing to existing dataset directory containing stage_2_train_labels.csv or stage_1_train_labels.csv.
     """
-    possible_roots = [
-        Path("/kaggle/input/rsna-pneumonia-detection-challenge"),
+    candidate_roots = [
         Path("/kaggle/input/competitions/rsna-pneumonia-detection-challenge"),
+        Path("/kaggle/input/rsna-pneumonia-detection-challenge"),
         Path("/kaggle/input/rsna-pneumonia-detection-2018"),
         Path("/kaggle/input/rsna-pneumonia-dataset-in-jpg-format"),
         get_project_root() / "data" / "raw" / "rsna-pneumonia-detection-challenge",
         get_project_root() / "data" / "raw",
     ]
 
-    # 1. Check exact candidate roots
-    for p in possible_roots:
+    # 1. Fast direct candidate check (O(1) file existence check)
+    for p in candidate_roots:
         if p.exists() and ((p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists()):
             logger.info(f"Dataset root auto-detected at: {p}")
             return p
 
-    # 2. Dynamically search /kaggle/input and /kaggle/input/competitions
-    kaggle_search_dirs = [Path("/kaggle/input"), Path("/kaggle/input/competitions")]
-    for base in kaggle_search_dirs:
+    # 2. Shallow directory scan over /kaggle/input/competitions and /kaggle/input (NO recursive rglob)
+    kaggle_bases = [Path("/kaggle/input/competitions"), Path("/kaggle/input")]
+    for base in kaggle_bases:
         if base.exists():
             for p in base.glob("*"):
                 if p.is_dir():
                     if (p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists():
-                        logger.info(f"Dataset root auto-detected via dynamic scan at: {p}")
+                        logger.info(f"Dataset root auto-detected via shallow scan at: {p}")
                         return p
 
-            matches = list(base.glob("**/*train_labels.csv"))
-            if len(matches) > 0:
-                resolved_dir = matches[0].parent
-                logger.info(f"Dataset root auto-detected via recursive search at: {resolved_dir}")
-                return resolved_dir
-
-    # 3. Check local raw directory
+    # 3. Check local raw data directory
     local_raw = get_project_root() / "data" / "raw"
     if local_raw.exists() and ((local_raw / "stage_2_train_labels.csv").exists() or (local_raw / "stage_1_train_labels.csv").exists()):
         logger.info(f"Dataset root auto-detected at local raw directory: {local_raw}")
