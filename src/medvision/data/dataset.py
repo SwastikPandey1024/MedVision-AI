@@ -26,9 +26,24 @@ def find_dataset_root() -> Path:
     ]
 
     for p in possible_paths:
-        if p.exists() and (p / "stage_2_train_labels.csv").exists():
+        if p.exists() and ((p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists()):
             logger.info(f"Dataset root auto-detected at: {p}")
             return p
+
+    # Dynamically scan all subdirectories under /kaggle/input
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        for p in kaggle_input.glob("*"):
+            if p.is_dir():
+                if (p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists():
+                    logger.info(f"Dataset root auto-detected via dynamic scan at: {p}")
+                    return p
+                # Deep search inside nested subfolders
+                nested = list(p.glob("**/*train_labels.csv"))
+                if len(nested) > 0:
+                    parent_dir = nested[0].parent
+                    logger.info(f"Dataset root auto-detected via nested search at: {parent_dir}")
+                    return parent_dir
 
     # Fallback to local raw data directory
     fallback = get_project_root() / "data" / "raw"
