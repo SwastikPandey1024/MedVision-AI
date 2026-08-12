@@ -88,9 +88,38 @@ def test_compute_training_class_weights():
 def test_metrics_instantiation():
     """Verify metric objects initialization and PR-AUC presence."""
     metrics = get_model_metrics()
+    assert len(metrics) >= 4
     metric_names = [m.name for m in metrics]
-
     assert "pr_auc" in metric_names
     assert "roc_auc" in metric_names
+
+
+def test_replica_context_train_step():
+    """Verify train step performs forward, backward, and optimizer update inside replica context."""
+    import math
+    strategy = tf.distribute.get_strategy()
+
+    with strategy.scope():
+        model = build_model(architecture="custom_cnn", compile_model=True, strategy=strategy)
+
+        def replica_train_step(x, y):
+            with tf.GradientTape() as tape:
+                y_pred = model(x, training=True)
+                loss = model.compute_loss(x, y, y_pred)
+            grads = tape.gradient(loss, model.trainable_variables)
+            grads_finite = all(g is None or bool(tf.reduce_all(tf.math.is_finite(g))) for g in grads)
+            model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+            return loss, grads_finite, y_pred
+
+        x_dummy = tf.random.normal((4, 224, 224, 3))
+        y_dummy = tf.constant([[0.0], [1.0], [0.0], [1.0]])
+
+        loss, grads_finite, y_pred = replica_train_step(x_dummy, y_dummy)
+        assert not math.isnan(float(loss))
+        assert grads_finite is True
+        assert y_pred.shape == (4, 1)
+
+    metrics = get_model_metrics()
+    metric_names = [m.name for m in metrics]
     assert "specificity" in metric_names
     assert "f1_score" in metric_names

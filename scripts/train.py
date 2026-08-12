@@ -260,40 +260,41 @@ def main():
                 logger.info(f"Validation Step {v_step+1}/2 Loss         : {v_loss_val:.4f}")
                 assert not math.isnan(v_loss_val) and not math.isinf(v_loss_val), "Val Loss is NaN/Inf!"
 
-            # 2. Replica-local training step for multi-GPU MirroredStrategy compatibility
+            # 2. Replica-local training step with optimizer application INSIDE replica context
             def replica_train_step(x, y):
                 with tf.GradientTape() as tape:
                     y_pred = model(x, training=True)
                     loss = model.compute_loss(x, y, y_pred)
                 grads = tape.gradient(loss, model.trainable_variables)
-                return loss, grads, y_pred
+                grads_finite = all(
+                    g is None or bool(tf.reduce_all(tf.math.is_finite(g)))
+                    for g in grads
+                )
+                model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                return loss, grads_finite, y_pred
 
             for step, (x_batch, y_batch) in enumerate(train_ds):
                 if step >= 4:
                     break
 
                 if strategy.num_replicas_in_sync > 1 and hasattr(strategy, "run"):
-                    per_replica_loss, per_replica_grads, per_replica_preds = strategy.run(
+                    per_replica_loss, per_replica_grads_finite, per_replica_preds = strategy.run(
                         replica_train_step,
                         args=(x_batch, y_batch),
                     )
                     loss_f = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica_loss, axis=None))
-                    grads = [
-                        strategy.reduce(tf.distribute.ReduceOp.SUM, g, axis=None) if g is not None else None
-                        for g in per_replica_grads
-                    ]
+                    if hasattr(per_replica_grads_finite, "values"):
+                        grads_finite = all(bool(v) for v in per_replica_grads_finite.values)
+                    else:
+                        grads_finite = bool(per_replica_grads_finite)
+
                     if hasattr(per_replica_preds, "values"):
                         predictions = tf.concat(per_replica_preds.values, axis=0)
                     else:
                         predictions = per_replica_preds
                 else:
-                    loss_tensor, grads, predictions = replica_train_step(x_batch, y_batch)
+                    loss_tensor, grads_finite, predictions = replica_train_step(x_batch, y_batch)
                     loss_f = float(loss_tensor)
-
-                model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
-
-                grads_finite = all(bool(tf.reduce_all(tf.math.is_finite(g))) for g in grads if g is not None)
-                preds_finite = bool(tf.reduce_all(tf.math.is_finite(predictions)))
 
                 logger.info(f"Training Step {step+1}/4")
                 logger.info(f"  Training Batch Shape         : {x_batch.shape}")
