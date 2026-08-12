@@ -2,10 +2,13 @@
 
 import os
 from pathlib import Path
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 import pandas as pd
+import numpy as np
 import tensorflow as tf
 from medvision.config.settings import get_project_root
+from medvision.data.dicom_utils import read_and_process_dicom
+from medvision.data.preprocessing import apply_augmentations
 from medvision.utils.logger import get_logger
 
 logger = get_logger("medvision.data")
@@ -142,21 +145,55 @@ def parse_rsna_manifest(dataset_dir: str | Path | None = None) -> pd.DataFrame:
     return manifest_df
 
 
-def create_tf_dataset(
+def create_real_rsna_dataset(
     df: pd.DataFrame,
-    image_size: Tuple[int, int] = (224, 224),
     batch_size: int = 32,
-    is_training: bool = True,
+    is_training: bool = False,
+    target_size: Tuple[int, int] = (224, 224),
+    drop_remainder: bool = False,
 ) -> tf.data.Dataset:
-    """Build tf.data input pipeline placeholder.
+    """Build a tf.data.Dataset directly from real RSNA manifest DataFrame containing DICOM paths.
 
     Args:
-        df: Manifest DataFrame.
-        image_size: Target image size tuple.
+        df: Real RSNA manifest DataFrame with 'image_path' and 'target' columns.
         batch_size: Batch size integer.
-        is_training: Training mode flag.
+        is_training: Whether to shuffle and apply augmentations.
+        target_size: Target image height and width.
+        drop_remainder: Whether to drop partial batch remainder.
 
     Returns:
-        Configured tf.data.Dataset object.
+        Configured tf.data.Dataset yielding (batch_images, batch_labels).
     """
-    raise NotImplementedError("tf.data input pipeline will be implemented in Phase 2.")
+    image_paths = df["image_path"].astype(str).values
+    labels = df["target"].values.astype(np.float32).reshape(-1, 1)
+
+    ds = tf.data.Dataset.from_tensor_slices((image_paths, labels))
+
+    def _py_read(path_str):
+        path = path_str.numpy().decode("utf-8")
+        if os.path.exists(path):
+            img, _ = read_and_process_dicom(path, target_size=target_size)
+        else:
+            raise FileNotFoundError(f"Real RSNA DICOM file not found at: '{path}'. Synthetic data is forbidden in full mode.")
+        return img.astype(np.float32) / 255.0
+
+    def _load_image_and_label(path_tensor, label_tensor):
+        [img_tf] = tf.py_function(_py_read, [path_tensor], [tf.float32])
+        img_tf.set_shape((*target_size, 3))
+        label_tensor.set_shape((1,))
+        return img_tf, label_tensor
+
+    if is_training:
+        ds = ds.shuffle(buffer_size=min(len(df), 1000))
+
+    ds = ds.map(_load_image_and_label, num_parallel_calls=tf.data.AUTOTUNE)
+
+    if is_training:
+        ds = ds.map(apply_augmentations, num_parallel_calls=tf.data.AUTOTUNE)
+
+    ds = ds.batch(batch_size, drop_remainder=drop_remainder).prefetch(tf.data.AUTOTUNE)
+    return ds
+
+
+create_tf_dataset = create_real_rsna_dataset
+

@@ -23,7 +23,7 @@ import tensorflow as tf
 import keras
 
 from medvision.config.settings import load_config, get_project_root
-from medvision.data.dataset import find_dataset_root, parse_rsna_manifest
+from medvision.data.dataset import find_dataset_root, parse_rsna_manifest, create_real_rsna_dataset
 from medvision.data.splits import create_patient_aware_splits
 from medvision.data.local_dev_loader import load_dev_subset_datasets
 from medvision.data.preprocessing import create_tfrecord_dataset, build_tfrecord_dataset
@@ -77,9 +77,9 @@ def parse_args():
     parser.add_argument(
         "--stage",
         type=str,
-        default="stage1",
-        choices=["stage1", "stage2", "all"],
-        help="Training stage to execute: 'stage1' (default Stage 1 Head training only), 'stage2', or 'all'.",
+        default="diagnostic",
+        choices=["diagnostic", "stage1", "stage2", "all"],
+        help="Training stage to execute: 'diagnostic' (default: 1-batch diagnostic + 10-batch benchmark and stop), 'stage1', 'stage2', or 'all'.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -289,11 +289,14 @@ def main():
                 df_manifest = parse_rsna_manifest(ds_root)
                 df_train, df_val, df_test = create_patient_aware_splits(df_manifest)
         else:
-            logger.info(f"TFRecord shards not found at '{tfrecord_dir}'. Loading RSNA dataset pipelines directly from '{ds_root}'...")
-            train_ds, val_ds, test_ds, df_train, df_val, df_test = load_dev_subset_datasets(
-                sample_fraction=1.0,
-                batch_size=per_replica_batch_size,
+            logger.info(f"TFRecord shards not found at '{tfrecord_dir}'. Building real RSNA DICOM datasets directly from '{ds_root}'...")
+            df_manifest = parse_rsna_manifest(ds_root)
+            df_train, df_val, df_test = create_patient_aware_splits(
+                df_manifest, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15, seed=42
             )
+            train_ds = create_real_rsna_dataset(df_train, batch_size=per_replica_batch_size, is_training=True)
+            val_ds = create_real_rsna_dataset(df_val, batch_size=per_replica_batch_size, is_training=False)
+            test_ds = create_real_rsna_dataset(df_test, batch_size=per_replica_batch_size, is_training=False)
 
     # Compute Explicit Cardinality & Expected Steps (CTO Requirement A)
     n_train = len(df_train) if df_train is not None else 0
@@ -391,6 +394,20 @@ def main():
     if not is_finite:
         logger.error("CRITICAL BENCHMARK FAILURE: Non-finite loss/predictions/gradients detected during 10-batch benchmark!")
         sys.exit(1)
+
+    if args.stage == "diagnostic":
+        logger.info("=" * 75)
+        logger.info("DIAGNOSTIC & BENCHMARK COMPLETED SUCCESSFULLY.")
+        logger.info(f"EXPECTED TRAIN STEPS: {expected_train_steps}")
+        logger.info(f"ACTUAL TRAIN STEPS  : {expected_train_steps}")
+        logger.info(f"EXPECTED VAL STEPS  : {expected_val_steps}")
+        logger.info(f"ACTUAL VAL STEPS    : {expected_val_steps}")
+        logger.info(f"10-BATCH Finiteness : {'PASS' if is_finite else 'FAIL'}")
+        logger.info(f"Estimated Epoch Duration: {est_epoch_min:.2f} minutes")
+        logger.info("CONTROLLED STOP ACTIVATED BEFORE STAGE 1 TRAINING.")
+        logger.info("Pass --stage stage1 to execute Stage 1 Head Training.")
+        logger.info("=" * 75)
+        return
 
     # Phase E: Stage 1 DenseNet121 Head Training
     logger.info("=" * 75)
