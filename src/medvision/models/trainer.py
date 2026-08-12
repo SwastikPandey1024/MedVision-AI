@@ -32,10 +32,14 @@ class NaNGuardCallback(keras.callbacks.Callback):
             logger.error("HARD NAN GUARD ACTIVATED AT BATCH END!")
             logger.error(f"First Bad Step : {self.first_bad_step}")
             logger.error(f"Reported Loss  : {loss}")
-            logger.error("Terminating current training stage immediately to prevent GPU resource waste.")
+            logger.error(
+                "Terminating current training stage immediately to prevent GPU resource waste."
+            )
             logger.error("=" * 75)
             self.model.stop_training = True
-            raise RuntimeError(f"HARD NAN GUARD: Training loss became non-finite ({loss}) at step {self.first_bad_step}!")
+            raise RuntimeError(
+                f"HARD NAN GUARD: Training loss became non-finite ({loss}) at step {self.first_bad_step}!"
+            )
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
         logs = logs or {}
@@ -49,7 +53,9 @@ class NaNGuardCallback(keras.callbacks.Callback):
             logger.error(f"Train Loss      : {loss}")
             logger.error("=" * 75)
             self.model.stop_training = True
-            raise RuntimeError(f"HARD NAN GUARD: Training loss became non-finite ({loss}) at epoch {self.first_bad_epoch}!")
+            raise RuntimeError(
+                f"HARD NAN GUARD: Training loss became non-finite ({loss}) at epoch {self.first_bad_epoch}!"
+            )
 
         if val_loss is not None and (math.isnan(val_loss) or math.isinf(val_loss)):
             self.first_bad_epoch = epoch + 1
@@ -59,7 +65,9 @@ class NaNGuardCallback(keras.callbacks.Callback):
             logger.error(f"Val Loss        : {val_loss}")
             logger.error("=" * 75)
             self.model.stop_training = True
-            raise RuntimeError(f"HARD NAN GUARD: Validation loss became non-finite ({val_loss}) at epoch {self.first_bad_epoch}!")
+            raise RuntimeError(
+                f"HARD NAN GUARD: Validation loss became non-finite ({val_loss}) at epoch {self.first_bad_epoch}!"
+            )
 
 
 def compute_training_class_weights(train_manifest_df: pd.DataFrame) -> Dict[int, float]:
@@ -88,7 +96,9 @@ def compute_training_class_weights(train_manifest_df: pd.DataFrame) -> Dict[int,
     n_pos = np.sum(targets == 1)
 
     if n_neg == 0 or n_pos == 0:
-        logger.warning("One class has zero samples in training set. Returning 1.0 weights.")
+        logger.warning(
+            "One class has zero samples in training set. Returning 1.0 weights."
+        )
         return {0: 1.0, 1: 1.0}
 
     weight_0 = float(n_samples / (2.0 * n_neg))
@@ -189,7 +199,11 @@ def run_real_batch_diagnostic(
     Returns:
         Dictionary containing granular diagnostic fields and finite flags per stage.
     """
-    header_title = "DEV SUBSET / SYNTHETIC DATASET SINGLE-BATCH STEP DIAGNOSTIC" if is_dev else "REAL RSNA DATASET SINGLE-BATCH STEP DIAGNOSTIC"
+    header_title = (
+        "DEV SUBSET / SYNTHETIC DATASET SINGLE-BATCH STEP DIAGNOSTIC"
+        if is_dev
+        else "REAL RSNA DATASET SINGLE-BATCH STEP DIAGNOSTIC"
+    )
     logger.info("=" * 75)
     logger.info(header_title)
     logger.info("=" * 75)
@@ -201,7 +215,9 @@ def run_real_batch_diagnostic(
     c0 = float(class_weights.get(0, 1.0)) if class_weights else 1.0
     c1 = float(class_weights.get(1, 1.0)) if class_weights else 1.0
 
-    bce_loss_fn = keras.losses.BinaryCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
+    bce_loss_fn = keras.losses.BinaryCrossentropy(
+        from_logits=False, reduction=tf.keras.losses.Reduction.NONE
+    )
 
     # 1. Fetch input/label statistics from first batch (outside strategy)
     x_sample, y_sample = next(iter(train_ds))
@@ -220,7 +236,10 @@ def run_real_batch_diagnostic(
     neg_count = int(np.sum(y_arr == 0.0))
 
     # Build distributed batch if multi-replica
-    is_distributed = hasattr(strategy, "experimental_distribute_dataset") and strategy.num_replicas_in_sync > 1
+    is_distributed = (
+        hasattr(strategy, "experimental_distribute_dataset")
+        and strategy.num_replicas_in_sync > 1
+    )
     if is_distributed:
         dist_ds = strategy.experimental_distribute_dataset(train_ds)
         dist_iter = iter(dist_ds)
@@ -246,7 +265,10 @@ def run_real_batch_diagnostic(
         non_null_grads = [g for g in gradients if g is not None]
         if len(non_null_grads) > 0:
             grads_finite = tf.reduce_all(
-                tf.concat([tf.reshape(tf.math.is_finite(g), [-1]) for g in non_null_grads], axis=0)
+                tf.concat(
+                    [tf.reshape(tf.math.is_finite(g), [-1]) for g in non_null_grads],
+                    axis=0,
+                )
             )
             grad_norm = tf.linalg.global_norm(non_null_grads)
             g_min = tf.reduce_min([tf.reduce_min(g) for g in non_null_grads])
@@ -291,20 +313,36 @@ def run_real_batch_diagnostic(
     if is_distributed and hasattr(strategy, "experimental_local_results"):
         local_preds = strategy.experimental_local_results(results[0])
         y_pred_concat = tf.concat(local_preds, axis=0)
-        raw_loss_val = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[1], axis=None))
-        weighted_loss_val = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[2], axis=None))
+        raw_loss_val = float(
+            strategy.reduce(tf.distribute.ReduceOp.MEAN, results[1], axis=None)
+        )
+        weighted_loss_val = float(
+            strategy.reduce(tf.distribute.ReduceOp.MEAN, results[2], axis=None)
+        )
 
-        grad_finite_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, results[3], axis=None)
+        grad_finite_sum = strategy.reduce(
+            tf.distribute.ReduceOp.SUM, results[3], axis=None
+        )
         grad_finite = bool(float(grad_finite_sum) == strategy.num_replicas_in_sync)
 
-        global_grad_norm = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[4], axis=None))
-        grad_min = float(strategy.reduce(tf.distribute.ReduceOp.MIN, results[5], axis=None))
-        grad_max = float(strategy.reduce(tf.distribute.ReduceOp.MAX, results[6], axis=None))
+        global_grad_norm = float(
+            strategy.reduce(tf.distribute.ReduceOp.MEAN, results[4], axis=None)
+        )
 
-        next_pred_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, results[7], axis=None)
+        local_g_mins = strategy.experimental_local_results(results[5])
+        grad_min = float(tf.reduce_min(tf.stack(list(local_g_mins))))
+
+        local_g_maxs = strategy.experimental_local_results(results[6])
+        grad_max = float(tf.reduce_max(tf.stack(list(local_g_maxs))))
+
+        next_pred_sum = strategy.reduce(
+            tf.distribute.ReduceOp.SUM, results[7], axis=None
+        )
         next_pred_finite = bool(float(next_pred_sum) == strategy.num_replicas_in_sync)
 
-        next_loss_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, results[8], axis=None)
+        next_loss_sum = strategy.reduce(
+            tf.distribute.ReduceOp.SUM, results[8], axis=None
+        )
         next_loss_finite = bool(float(next_loss_sum) == strategy.num_replicas_in_sync)
     else:
         y_pred_concat = results[0]
@@ -327,11 +365,17 @@ def run_real_batch_diagnostic(
     weighted_loss_finite = bool(math.isfinite(weighted_loss_val))
 
     none_grads_count = 0  # Handled inside replica context
-    weights_finite = all(bool(tf.reduce_all(tf.math.is_finite(w))) for w in model.weights)
+    weights_finite = all(
+        bool(tf.reduce_all(tf.math.is_finite(w))) for w in model.weights
+    )
 
     opt_class = model.optimizer.__class__.__name__ if model.optimizer else "None"
     if hasattr(model.optimizer, "learning_rate"):
-        lr_val = float(model.optimizer.learning_rate.numpy()) if hasattr(model.optimizer.learning_rate, "numpy") else float(model.optimizer.learning_rate)
+        lr_val = (
+            float(model.optimizer.learning_rate.numpy())
+            if hasattr(model.optimizer.learning_rate, "numpy")
+            else float(model.optimizer.learning_rate)
+        )
     else:
         lr_val = 0.0
 
@@ -393,14 +437,30 @@ def run_real_batch_diagnostic(
     }
 
     # Print clean diagnostic log per CTO specification
-    logger.info(f"INPUT       : dtype={x_dtype} | shape={x_shape} | min={x_min:.4f} | max={x_max:.4f} | mean={x_mean:.4f} | finite={x_finite}")
-    logger.info(f"LABELS      : dtype={y_dtype} | unique={y_unique} | pos={pos_count} | neg={neg_count} | finite={y_finite}")
-    logger.info(f"PREDICTIONS : dtype={pred_dtype} | shape={pred_shape} | min={pred_min:.4f} | max={pred_max:.4f} | finite={pred_finite}")
-    logger.info(f"RAW BCE     : value={raw_loss_val:.4f} | finite={raw_loss_finite} | dtype=float32")
-    logger.info(f"WEIGHTED BCE: value={weighted_loss_val:.4f} | finite={weighted_loss_finite} | dtype=float32")
-    logger.info(f"GRADIENTS   : norm={global_grad_norm:.4f} | None_count={none_grads_count} | range=[{grad_min:.4e}, {grad_max:.4e}] | finite={grad_finite}")
-    logger.info(f"OPTIMIZER   : class={opt_class} | lr={lr_val} | policy={policy_name} | loss_scale={has_loss_scale}")
-    logger.info(f"AFTER UPDATE: weights_finite={weights_finite} | next_pred_finite={next_pred_finite} | next_loss_finite={next_loss_finite}")
+    logger.info(
+        f"INPUT       : dtype={x_dtype} | shape={x_shape} | min={x_min:.4f} | max={x_max:.4f} | mean={x_mean:.4f} | finite={x_finite}"
+    )
+    logger.info(
+        f"LABELS      : dtype={y_dtype} | unique={y_unique} | pos={pos_count} | neg={neg_count} | finite={y_finite}"
+    )
+    logger.info(
+        f"PREDICTIONS : dtype={pred_dtype} | shape={pred_shape} | min={pred_min:.4f} | max={pred_max:.4f} | finite={pred_finite}"
+    )
+    logger.info(
+        f"RAW BCE     : value={raw_loss_val:.4f} | finite={raw_loss_finite} | dtype=float32"
+    )
+    logger.info(
+        f"WEIGHTED BCE: value={weighted_loss_val:.4f} | finite={weighted_loss_finite} | dtype=float32"
+    )
+    logger.info(
+        f"GRADIENTS   : norm={global_grad_norm:.4f} | None_count={none_grads_count} | range=[{grad_min:.4e}, {grad_max:.4e}] | finite={grad_finite}"
+    )
+    logger.info(
+        f"OPTIMIZER   : class={opt_class} | lr={lr_val} | policy={policy_name} | loss_scale={has_loss_scale}"
+    )
+    logger.info(
+        f"AFTER UPDATE: weights_finite={weights_finite} | next_pred_finite={next_pred_finite} | next_loss_finite={next_loss_finite}"
+    )
     logger.info(f"FIRST FAILURE TRACE: {first_failure}")
     logger.info("=" * 75)
 
@@ -439,10 +499,14 @@ def train_model(
     root = get_project_root()
 
     if checkpoint_filepath is None:
-        checkpoint_filepath = str(root / "models" / "checkpoints" / f"{experiment_name}_best.keras")
+        checkpoint_filepath = str(
+            root / "models" / "checkpoints" / f"{experiment_name}_best.keras"
+        )
 
     tensorboard_dir = str(root / "artifacts" / "tensorboard" / experiment_name)
-    csv_log_path = str(root / "artifacts" / "experiments" / f"{experiment_name}_history.csv")
+    csv_log_path = str(
+        root / "artifacts" / "experiments" / f"{experiment_name}_history.csv"
+    )
 
     patience_es = 5
     patience_lr = 3
@@ -460,7 +524,9 @@ def train_model(
         reduce_lr_patience=patience_lr,
     )
 
-    logger.info(f"Starting model training for {epochs} epochs on experiment '{experiment_name}'...")
+    logger.info(
+        f"Starting model training for {epochs} epochs on experiment '{experiment_name}'..."
+    )
     logger.info(f"Checkpoint destination  : {checkpoint_filepath}")
     logger.info(f"Configured steps_per_epoch : {steps_per_epoch}")
     logger.info(f"Configured validation_steps: {validation_steps}")
