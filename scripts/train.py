@@ -26,7 +26,10 @@ import tensorflow as tf
 import keras
 
 from medvision.config.settings import load_config, get_project_root
+from medvision.data.dataset import find_dataset_root, parse_rsna_manifest
+from medvision.data.splits import create_patient_aware_splits
 from medvision.data.local_dev_loader import load_dev_subset_datasets
+from medvision.data.preprocessing import build_tfrecord_dataset
 from medvision.models.factory import build_model, get_distribution_strategy
 from medvision.models.densenet import unfreeze_densenet_for_finetuning
 from medvision.models.trainer import train_model, compute_training_class_weights
@@ -215,16 +218,11 @@ def main():
         epochs = args.epochs
     else:
         logger.info("Full mode selected: Resolving RSNA dataset root & data pipelines...")
-        from medvision.data.dataset import find_dataset_root, parse_rsna_manifest
-        from medvision.data.splits import create_patient_aware_splits
-        from medvision.data.local_dev_loader import load_dev_subset_datasets
-
         ds_root = find_dataset_root()
         tfrecord_dir = root / "data" / "processed" / "tfrecords"
         train_shards = list(tfrecord_dir.glob("train_*.tfrecord"))
 
         if len(train_shards) > 0:
-            from medvision.data.preprocessing import build_tfrecord_dataset
             train_ds = build_tfrecord_dataset(train_shards, batch_size=args.batch_size, is_training=True)
             val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=args.batch_size, is_training=False)
             test_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("test_*.tfrecord")), batch_size=args.batch_size, is_training=False)
