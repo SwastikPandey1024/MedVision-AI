@@ -70,6 +70,7 @@ def create_tfrecord_dataset(
     target_size: Tuple[int, int] = (224, 224),
     is_training: bool = True,
     shuffle_buffer_size: int = 1000,
+    drop_remainder: bool = True,
 ) -> tf.data.Dataset:
     """Build tf.data.Dataset input pipeline from TFRecord shards.
 
@@ -79,6 +80,7 @@ def create_tfrecord_dataset(
         target_size: Target image dimensions.
         is_training: Whether to enable shuffling and augmentations.
         shuffle_buffer_size: Buffer size for shuffling.
+        drop_remainder: Whether to drop remainder partial batch for multi-GPU shape consistency.
 
     Returns:
         Configured tf.data.Dataset object yielding (batch_images, batch_labels).
@@ -86,6 +88,7 @@ def create_tfrecord_dataset(
     dataset = tf.data.TFRecordDataset(shard_paths, num_parallel_reads=tf.data.AUTOTUNE)
 
     if is_training:
+        dataset = dataset.repeat()
         dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
 
     # Parse TFRecord examples
@@ -98,7 +101,7 @@ def create_tfrecord_dataset(
     if is_training:
         dataset = dataset.map(apply_augmentations, num_parallel_calls=tf.data.AUTOTUNE)
 
-    dataset = dataset.batch(batch_size, drop_remainder=False)
+    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
     return dataset

@@ -136,9 +136,10 @@ def load_dev_subset_datasets(
         lbl_tensor = tf.constant(np.array(labels_list, dtype=np.float32).reshape(-1, 1))
 
         ds = tf.data.Dataset.from_tensor_slices((img_tensor, lbl_tensor))
+        ds = ds.repeat()
         if is_training:
-            ds = ds.shuffle(buffer_size=min(len(df), 100)).repeat()
-        ds = ds.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+            ds = ds.shuffle(buffer_size=min(len(df), 100))
+        ds = ds.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
         return ds
 
     train_ds = _df_to_tf_dataset(df_train, is_training=True)
