@@ -15,40 +15,48 @@ def find_dataset_root() -> Path:
     """Dynamically discover RSNA dataset root path in Kaggle or local environment.
 
     Returns:
-        Path object pointing to existing dataset directory.
+        Path object pointing to existing dataset directory containing stage_2_train_labels.csv or stage_1_train_labels.csv.
     """
-    possible_paths = [
+    possible_roots = [
         Path("/kaggle/input/rsna-pneumonia-detection-challenge"),
+        Path("/kaggle/input/competitions/rsna-pneumonia-detection-challenge"),
         Path("/kaggle/input/rsna-pneumonia-detection-2018"),
         Path("/kaggle/input/rsna-pneumonia-dataset-in-jpg-format"),
         get_project_root() / "data" / "raw" / "rsna-pneumonia-detection-challenge",
         get_project_root() / "data" / "raw",
     ]
 
-    for p in possible_paths:
+    # 1. Check exact candidate roots
+    for p in possible_roots:
         if p.exists() and ((p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists()):
             logger.info(f"Dataset root auto-detected at: {p}")
             return p
 
-    # Dynamically scan all subdirectories under /kaggle/input
-    kaggle_input = Path("/kaggle/input")
-    if kaggle_input.exists():
-        for p in kaggle_input.glob("*"):
-            if p.is_dir():
-                if (p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists():
-                    logger.info(f"Dataset root auto-detected via dynamic scan at: {p}")
-                    return p
-                # Deep search inside nested subfolders
-                nested = list(p.glob("**/*train_labels.csv"))
-                if len(nested) > 0:
-                    parent_dir = nested[0].parent
-                    logger.info(f"Dataset root auto-detected via nested search at: {parent_dir}")
-                    return parent_dir
+    # 2. Dynamically search /kaggle/input and /kaggle/input/competitions
+    kaggle_search_dirs = [Path("/kaggle/input"), Path("/kaggle/input/competitions")]
+    for base in kaggle_search_dirs:
+        if base.exists():
+            for p in base.glob("*"):
+                if p.is_dir():
+                    if (p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists():
+                        logger.info(f"Dataset root auto-detected via dynamic scan at: {p}")
+                        return p
 
-    # Fallback to local raw data directory
-    fallback = get_project_root() / "data" / "raw"
-    logger.warning(f"RSNA dataset files not found in standard paths. Defaulting root to: {fallback}")
-    return fallback
+            matches = list(base.glob("**/*train_labels.csv"))
+            if len(matches) > 0:
+                resolved_dir = matches[0].parent
+                logger.info(f"Dataset root auto-detected via recursive search at: {resolved_dir}")
+                return resolved_dir
+
+    # 3. Check local raw directory
+    local_raw = get_project_root() / "data" / "raw"
+    if local_raw.exists() and ((local_raw / "stage_2_train_labels.csv").exists() or (local_raw / "stage_1_train_labels.csv").exists()):
+        logger.info(f"Dataset root auto-detected at local raw directory: {local_raw}")
+        return local_raw
+
+    # Fallback to local raw data directory with warning
+    logger.warning(f"RSNA dataset labels file not found in standard paths. Defaulting root to: {local_raw}")
+    return local_raw
 
 
 def parse_rsna_manifest(dataset_dir: str | Path | None = None) -> pd.DataFrame:

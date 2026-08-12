@@ -75,3 +75,21 @@ def test_eda_reporting(synthetic_manifest, tmp_path):
 
     assert (tmp_path / "eda_report.json").exists()
     assert (tmp_path / "eda_report.md").exists()
+
+
+def test_find_dataset_root_nested_kaggle_paths(tmp_path):
+    """Test dynamic path resolution and parsing for nested Kaggle competition input directories."""
+    from medvision.data.dataset import parse_rsna_manifest
+
+    dataset_dir = tmp_path / "competitions" / "rsna-pneumonia-detection-challenge"
+    dataset_dir.mkdir(parents=True)
+    labels_csv = dataset_dir / "stage_2_train_labels.csv"
+    class_info_csv = dataset_dir / "stage_2_detailed_class_info.csv"
+    labels_csv.write_text("patientId,x,y,width,height,Target\np1,10.0,10.0,20.0,20.0,1\n")
+    class_info_csv.write_text("patientId,class\np1,Lung Opacity\n")
+
+    manifest = parse_rsna_manifest(dataset_dir)
+    assert len(manifest) == 1
+    assert manifest.iloc[0]["patient_id"] == "p1"
+    assert manifest.iloc[0]["target"] == 1
+
