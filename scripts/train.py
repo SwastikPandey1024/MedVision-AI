@@ -332,6 +332,7 @@ def main():
             train_ds=train_ds,
             class_weights=class_weights,
             strategy=strategy,
+            is_dev=True,
         )
         if dev_diag["first_failure"] != "NONE (ALL STAGES FINITE)":
             logger.error(f"DEV SMOKE DIAGNOSTIC FAILURE: Non-finite values traced to: {dev_diag['first_failure']}")

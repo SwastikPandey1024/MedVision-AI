@@ -178,8 +178,9 @@ def run_real_batch_diagnostic(
     train_ds: tf.data.Dataset,
     class_weights: Optional[Dict[int, float]] = None,
     strategy: Optional[tf.distribute.Strategy] = None,
+    is_dev: bool = False,
 ) -> Dict[str, Any]:
-    """Execute a granular step-by-step real data diagnostic on exactly ONE training batch.
+    """Execute a granular step-by-step data diagnostic on exactly ONE training batch.
 
     Uses replica-safe execution under strategy.run() to avoid DistributedVariable errors.
 
@@ -188,8 +189,9 @@ def run_real_batch_diagnostic(
     Returns:
         Dictionary containing granular diagnostic fields and finite flags per stage.
     """
+    header_title = "DEV SUBSET / SYNTHETIC DATASET SINGLE-BATCH STEP DIAGNOSTIC" if is_dev else "REAL RSNA DATASET SINGLE-BATCH STEP DIAGNOSTIC"
     logger.info("=" * 75)
-    logger.info("REAL RSNA DATASET SINGLE-BATCH STEP DIAGNOSTIC")
+    logger.info(header_title)
     logger.info("=" * 75)
 
     if strategy is None:
@@ -266,16 +268,21 @@ def run_real_batch_diagnostic(
         next_raw_loss = tf.reduce_mean(bce_loss_fn(y_f32, next_pred_f32))
         next_loss_finite = tf.math.is_finite(next_raw_loss)
 
+        # Convert boolean finiteness flags to tf.int32 inside replica context
+        grads_finite_int = tf.cast(grads_finite, tf.int32)
+        next_pred_finite_int = tf.cast(next_pred_finite, tf.int32)
+        next_loss_finite_int = tf.cast(next_loss_finite, tf.int32)
+
         return (
             y_pred_f32,
             raw_loss,
             weighted_loss,
-            grads_finite,
+            grads_finite_int,
             grad_norm,
             g_min,
             g_max,
-            next_pred_finite,
-            next_loss_finite,
+            next_pred_finite_int,
+            next_loss_finite_int,
         )
 
     # Execute diagnostic via strategy.run
@@ -287,17 +294,17 @@ def run_real_batch_diagnostic(
         raw_loss_val = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[1], axis=None))
         weighted_loss_val = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[2], axis=None))
 
-        grad_finite_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, tf.cast(results[3], tf.int32), axis=None)
+        grad_finite_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, results[3], axis=None)
         grad_finite = bool(float(grad_finite_sum) == strategy.num_replicas_in_sync)
 
         global_grad_norm = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[4], axis=None))
         grad_min = float(strategy.reduce(tf.distribute.ReduceOp.MIN, results[5], axis=None))
         grad_max = float(strategy.reduce(tf.distribute.ReduceOp.MAX, results[6], axis=None))
 
-        next_pred_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, tf.cast(results[7], tf.int32), axis=None)
+        next_pred_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, results[7], axis=None)
         next_pred_finite = bool(float(next_pred_sum) == strategy.num_replicas_in_sync)
 
-        next_loss_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, tf.cast(results[8], tf.int32), axis=None)
+        next_loss_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, results[8], axis=None)
         next_loss_finite = bool(float(next_loss_sum) == strategy.num_replicas_in_sync)
     else:
         y_pred_concat = results[0]

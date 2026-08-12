@@ -109,7 +109,27 @@ def test_real_batch_diagnostic_finite_flags():
     y_dummy = tf.constant([[0.0], [1.0], [0.0], [1.0], [0.0], [1.0], [0.0], [1.0]])
     ds = tf.data.Dataset.from_tensor_slices((x_dummy, y_dummy)).batch(4)
 
-    diag = run_real_batch_diagnostic(model, train_ds=ds)
+    diag = run_real_batch_diagnostic(model, train_ds=ds, is_dev=True)
+
+    assert diag["x_finite"] is True
+    assert diag["y_finite"] is True
+    assert diag["pred_finite"] is True
+    assert diag["raw_loss_finite"] is True
+    assert diag["grad_finite"] is True
+    assert diag["post_update_weights_finite"] is True
+    assert diag["first_failure"] == "NONE (ALL STAGES FINITE)"
+
+
+def test_real_batch_diagnostic_with_strategy():
+    """Verify run_real_batch_diagnostic works under an explicit distribution strategy."""
+    strategy = tf.distribute.get_strategy()
+    model = build_model(architecture="custom_cnn", compile_model=True, strategy=strategy)
+
+    x_dummy = tf.random.uniform((8, 224, 224, 3), minval=0.0, maxval=1.0)
+    y_dummy = tf.constant([[0.0], [1.0], [0.0], [1.0], [0.0], [1.0], [0.0], [1.0]])
+    ds = tf.data.Dataset.from_tensor_slices((x_dummy, y_dummy)).batch(4)
+
+    diag = run_real_batch_diagnostic(model, train_ds=ds, strategy=strategy, is_dev=True)
 
     assert diag["x_finite"] is True
     assert diag["y_finite"] is True
