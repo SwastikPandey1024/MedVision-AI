@@ -127,24 +127,64 @@ def main():
     logger.info(f"  Trainable Parameters: {trainable_params:,}")
     logger.info(f"  Non-trainable Parameters: {non_trainable_params:,}")
 
-    # Short Smoke Test Mode
+    # Short Smoke Test Mode (Phase 3/4 GPU Smoke Test)
     if args.smoke_test:
-        logger.info("Executing 3-step Smoke Test validation...")
-        for step, (x_batch, y_batch) in enumerate(train_ds.take(3)):
-            predictions = model(x_batch, training=False)
-            loss_val = model.compiled_loss(y_batch, predictions)
-            logger.info(
-                f"  Smoke Step {step+1}/3 | Batch Shape: {x_batch.shape} | "
-                f"Predictions Shape: {predictions.shape} | Loss: {float(loss_val):.4f}"
-            )
-            assert not tf.math.is_nan(loss_val), "Loss is NaN during smoke test!"
-            assert not tf.math.is_inf(loss_val), "Loss is Inf during smoke test!"
-        logger.info("Smoke test passed successfully! Output shape and loss are valid.")
+        import math
+        logger.info("Executing Phase 3/4 GPU Smoke Test validation...")
+        logger.info(f"Distribution Strategy: {strategy.__class__.__name__} | Replicas: {strategy.num_replicas_in_sync}")
+        logger.info(f"Mixed Precision Policy: {tf.keras.mixed_precision.global_policy().name}")
 
-        # Test checkpoint writing
+        with strategy.scope():
+            # 1. Validation steps (1-2 steps)
+            val_steps_count = 0
+            for v_step, (vx_batch, vy_batch) in enumerate(val_ds):
+                if v_step >= 2:
+                    break
+                v_preds = model(vx_batch, training=False)
+                v_loss_val = float(model.compute_loss(vx_batch, vy_batch, v_preds))
+                logger.info(f"  Val Step {v_step+1}/2 | Val Batch Shape: {vx_batch.shape} | Val Loss: {v_loss_val:.4f}")
+                assert not math.isnan(v_loss_val) and not math.isinf(v_loss_val), "Val Loss is NaN/Inf!"
+                val_steps_count += 1
+
+            # 2. Training steps (4 steps) with GradientTape & finite gradient check
+            for step, (x_batch, y_batch) in enumerate(train_ds):
+                if step >= 4:
+                    break
+                with tf.GradientTape() as tape:
+                    predictions = model(x_batch, training=True)
+                    loss_val = model.compute_loss(x_batch, y_batch, predictions)
+
+                grads = tape.gradient(loss_val, model.trainable_variables)
+                model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+                grads_finite = all(bool(tf.reduce_all(tf.math.is_finite(g))) for g in grads if g is not None)
+                assert grads_finite, f"Gradients contain NaN/Inf at step {step+1}!"
+
+                loss_f = float(loss_val)
+                logger.info(
+                    f"  Smoke Step {step+1}/4 | Batch Shape: {x_batch.shape} | "
+                    f"Predictions Shape: {predictions.shape} | Loss: {loss_f:.4f} | Grads Finite: {grads_finite}"
+                )
+                assert not math.isnan(loss_f) and not math.isinf(loss_f), "Loss is NaN/Inf during smoke test!"
+                assert predictions.shape == (x_batch.shape[0], 1), f"Unexpected predictions shape {predictions.shape}"
+
+        # 3. Verify CSVLogger / TensorBoard callback initialization
+        from keras.callbacks import CSVLogger, TensorBoard
+        log_dir = root / "artifacts" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _ = CSVLogger(log_dir / "smoketest_log.csv")
+        _ = TensorBoard(log_dir / "tensorboard")
+        logger.info("Verified CSVLogger and TensorBoard callbacks initialization.")
+
+        # 4. Test checkpoint writing
         test_ckpt_path = root / "artifacts" / "experiments" / f"{args.architecture}_smoketest.keras"
+        test_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
         model.save(test_ckpt_path)
+        assert test_ckpt_path.exists() and test_ckpt_path.stat().st_size > 0, "Checkpoint failed to save!"
         logger.info(f"Verified checkpoint creation at: {test_ckpt_path}")
+        logger.info("=" * 60)
+        logger.info("Phase 3/4 GPU Smoke Test finished SUCCESSFULLY. Stopping before full training.")
+        logger.info("=" * 60)
         return
 
     # Execute full/dev training
