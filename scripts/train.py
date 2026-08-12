@@ -326,6 +326,17 @@ def main():
         logger.info(f"Replicas                       : {num_replicas}")
         logger.info(f"Mixed Precision Policy         : {policy_name}")
 
+        # Run 1-batch step diagnostic for DEV/synthetic dataset before model.fit()
+        dev_diag = run_real_batch_diagnostic(
+            model=model,
+            train_ds=train_ds,
+            class_weights=class_weights,
+            strategy=strategy,
+        )
+        if dev_diag["first_failure"] != "NONE (ALL STAGES FINITE)":
+            logger.error(f"DEV SMOKE DIAGNOSTIC FAILURE: Non-finite values traced to: {dev_diag['first_failure']}")
+            sys.exit(1)
+
         with strategy.scope():
             history = model.fit(
                 train_ds,
