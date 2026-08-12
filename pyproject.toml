@@ -11,7 +11,7 @@ authors = [
     { name = "MedVision AI Team", email = "research@medvision.ai" }
 ]
 license = { text = "MIT" }
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Healthcare Industry",
@@ -29,7 +29,7 @@ dependencies = [
     "streamlit>=1.30.0",
     "opencv-python-headless>=4.9.0",
     "pillow>=10.0.0",
-    "numpy>=1.24.0,<2.0.0",
+    "numpy>=1.24.0",
     "pandas>=2.0.0",
     "scikit-learn>=1.3.0",
     "matplotlib>=3.7.0",

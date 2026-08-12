@@ -83,9 +83,21 @@ def load_dev_subset_datasets(
 
     if manifest_path.exists():
         df_full = pd.read_csv(manifest_path)
-        min_samples = min(60, len(df_full))
-        num_samples = max(int(len(df_full) * sample_fraction), min_samples)
-        df_dev = df_full.sample(n=num_samples, random_state=42).reset_index(drop=True)
+        if len(df_full) >= 20:
+            num_samples = max(int(len(df_full) * sample_fraction), 20)
+            df_dev = df_full.sample(n=num_samples, random_state=42).reset_index(drop=True)
+        else:
+            logger.info(f"Local manifest has {len(df_full)} rows. Using synthetic dev dataset (100 samples) for split safety.")
+            np.random.seed(42)
+            n_samples = 100
+            targets = np.array([0] * 70 + [1] * 30)
+            np.random.shuffle(targets)
+            df_dev = pd.DataFrame({
+                "patient_id": [f"DEV_PATIENT_{i:03d}" for i in range(n_samples)],
+                "target": targets,
+                "image_path": [f"data/raw/stage_2_train_images/DEV_PATIENT_{i:03d}.dcm" for i in range(n_samples)],
+                "bbox_count": np.random.choice([0, 1, 2], size=n_samples, p=[0.70, 0.25, 0.05]),
+            })
     else:
         logger.warning("Manifest CSV not found. Generating synthetic dev dataset for CPU testing.")
         np.random.seed(42)

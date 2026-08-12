@@ -1,6 +1,6 @@
 """DenseNet121 transfer learning model architecture for MedVision-AI."""
 
-from typing import Tuple
+from typing import Tuple, Optional
 import keras
 from keras import layers
 
@@ -63,6 +63,7 @@ def build_densenet121(
 def unfreeze_densenet_for_finetuning(
     model: keras.Model,
     unfreeze_layers: int = 20,
+    learning_rate: Optional[float] = 1e-5,
 ) -> keras.Model:
     """Safely unfreeze top N layers of DenseNet121 backbone while keeping BatchNormalization layers frozen.
 
@@ -73,6 +74,7 @@ def unfreeze_densenet_for_finetuning(
     Args:
         model: DenseNet121 Keras model instance.
         unfreeze_layers: Number of top layers from the end of the backbone to unfreeze.
+        learning_rate: Optional fine-tuning learning rate (default 1e-5).
 
     Returns:
         Updated Keras Model.
@@ -103,5 +105,12 @@ def unfreeze_densenet_for_finetuning(
             else:
                 if isinstance(layer, layers.BatchNormalization):
                     layer.trainable = False
+
+    if learning_rate is not None and hasattr(model, "optimizer") and model.optimizer is not None:
+        from medvision.utils.metrics import get_model_metrics
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
+        loss_fn = keras.losses.BinaryCrossentropy()
+        metrics = get_model_metrics()
+        model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics)
 
     return model

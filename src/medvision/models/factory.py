@@ -144,7 +144,8 @@ def build_model(
             model = keras.Model(inputs=inputs, outputs=outputs, name="EfficientNetB0Extensible")
 
         if compile_model:
-            optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
+            lr_val = float(learning_rate) if isinstance(learning_rate, (int, float, str)) else learning_rate
+            optimizer = keras.optimizers.Adam(learning_rate=lr_val)
             loss_fn = keras.losses.BinaryCrossentropy()
             metrics = get_model_metrics()
 
