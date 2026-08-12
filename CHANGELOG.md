@@ -5,6 +5,21 @@ All notable changes to the **MedVision-AI** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0-alpha] - 2026-08-12
+
+### Fixed & Added
+- **Single-Instance Distribution Strategy Architecture & Kaggle Multi-GPU Fix**:
+  - Refactored `build_model` in `src/medvision/models/factory.py` to accept `strategy: Optional[tf.distribute.Strategy] = None` and reuse existing `MirroredStrategy` instances without secondary creation.
+  - Updated `scripts/train.py` to instantiate `strategy` once and pass it downstream to eliminate `RuntimeError: Mixing different tf.distribute.Strategy objects`.
+  - Added explicit Strategy object reuse assertion logging: `Strategy object identity / reuse: PASS`.
+  - Enforced persistent directory locking `%cd /kaggle/working/MedVision-AI` across Kaggle notebook cells in `notebooks/kaggle/medvision_ai_kaggle_gpu.ipynb`.
+- **Validation-Only Decision Threshold Selection & Evaluation Engine**:
+  - Implemented `select_optimal_threshold_from_val` in `src/medvision/evaluation/threshold.py` to lock thresholds strictly on validation data.
+  - Implemented `generate_model_comparison_report` in `src/medvision/evaluation/reporting.py` with primary ranking on **PR-AUC** and secondary on **ROC-AUC**.
+  - Implemented experiment manifest reproducibility generator in `src/medvision/utils/reproducibility.py`.
+  - Added comprehensive test suites in `tests/test_evaluation.py` and `tests/test_models.py` (30 passed tests).
+  - Documented multi-GPU distribution architecture in `docs/adr/ADR-009-multi-gpu-distribution-strategy-reuse.md`.
+
 ## [0.4.0-alpha] - 2026-08-11
 
 ### Added

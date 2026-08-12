@@ -45,10 +45,10 @@ To eliminate data leakage, patients are partitioned strictly by `patient_id` usi
 - [x] **Phase 1: Dataset Acquisition & Quality Control EDA**
 - [x] **Phase 2: Preprocessing Engine & `tf.data` Pipeline**
 - [x] **Phase 3: Custom CNN Baseline & Training Engine**
-- [ ] **Phase 4: DenseNet121 Transfer Learning Fine-Tuning**
-- [ ] **Phase 5: Controlled Layer Fine-Tuning**
-- [ ] **Phase 6: Systematic Hyperparameter & Data Experiments**
-- [ ] **Phase 7: Comprehensive Evaluation & Error Analysis**
+- [x] **Phase 4: DenseNet121 Transfer Learning Fine-Tuning & Multi-GPU Strategy**
+- [x] **Phase 5: Controlled Layer Fine-Tuning & BatchNorm Protection**
+- [x] **Phase 6: Systematic Hyperparameter & Data Experiments**
+- [x] **Phase 7: Comprehensive Evaluation & Threshold Selection**
 - [ ] **Phase 8: Grad-CAM Explainability Engine**
 - [ ] **Phase 9: Flask REST API Backend**
 - [ ] **Phase 10: Streamlit Interactive Web Application**

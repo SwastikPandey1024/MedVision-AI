@@ -67,3 +67,39 @@ def test_evaluate_model_performance(tmp_path):
     assert res["json_path"].exists()
     assert res["md_path"].exists()
     assert res["metrics"]["sample_count"] == 8
+
+
+def test_select_optimal_threshold_from_val():
+    """Verify threshold selection uses validation predictions only without test data."""
+    from medvision.evaluation import select_optimal_threshold_from_val
+    val_y_true = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    val_y_pred = np.array([0.1, 0.2, 0.4, 0.3, 0.6, 0.7, 0.8, 0.9])
+
+    th_result = select_optimal_threshold_from_val(val_y_true, val_y_pred, criterion="f1_score")
+
+    assert "selected_threshold" in th_result
+    assert 0.1 <= th_result["selected_threshold"] <= 0.9
+    assert th_result["test_data_used"] is False
+
+
+def test_generate_model_comparison_report(tmp_path):
+    """Verify model comparison report generation and PR-AUC primary ranking."""
+    from medvision.evaluation import generate_model_comparison_report
+
+    models_data = [
+        {"model_name": "Custom CNN Baseline", "pr_auc": 0.7200, "roc_auc": 0.8100, "accuracy": 0.8500, "params": 500000},
+        {"model_name": "DenseNet121 Stage 2", "pr_auc": 0.8900, "roc_auc": 0.9400, "accuracy": 0.9100, "params": 7301185},
+        {"model_name": "DenseNet121 Stage 1", "pr_auc": 0.8300, "roc_auc": 0.8900, "accuracy": 0.8800, "params": 7301185},
+    ]
+
+    out_dir = tmp_path / "comp"
+    res = generate_model_comparison_report(models_data, out_dir)
+
+    assert res["markdown_path"].exists()
+    assert res["json_path"].exists()
+
+    df = res["comparison_df"]
+    # Check that rank #1 is DenseNet121 Stage 2 (highest PR-AUC = 0.8900)
+    assert df.iloc[0]["model_name"] == "DenseNet121 Stage 2"
+    assert df.iloc[1]["model_name"] == "DenseNet121 Stage 1"
+    assert df.iloc[2]["model_name"] == "Custom CNN Baseline"
