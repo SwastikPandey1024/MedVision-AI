@@ -26,21 +26,29 @@ def find_dataset_root() -> Path:
         get_project_root() / "data" / "raw",
     ]
 
-    # 1. Fast direct candidate check (O(1) file existence check)
+    # 1. Fast direct candidate check
     for p in candidate_roots:
-        if p.exists() and ((p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists()):
-            logger.info(f"Dataset root auto-detected at: {p}")
-            return p
+        if p.exists():
+            if (p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists() or len(list(p.glob("*train_labels.csv"))) > 0:
+                logger.info(f"Dataset root auto-detected at: {p}")
+                return p
 
-    # 2. Shallow directory scan over /kaggle/input/competitions and /kaggle/input (NO recursive rglob)
+    # 2. Shallow directory scan over /kaggle/input/competitions and /kaggle/input
     kaggle_bases = [Path("/kaggle/input/competitions"), Path("/kaggle/input")]
     for base in kaggle_bases:
         if base.exists():
             for p in base.glob("*"):
                 if p.is_dir():
-                    if (p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists():
+                    if (p / "stage_2_train_labels.csv").exists() or (p / "stage_1_train_labels.csv").exists() or len(list(p.glob("*train_labels.csv"))) > 0:
                         logger.info(f"Dataset root auto-detected via shallow scan at: {p}")
                         return p
+
+            # Check 1 level deeper (e.g. /kaggle/input/competitions/rsna-pneumonia-detection-challenge/...)
+            for sub in base.glob("*/*"):
+                if sub.is_dir():
+                    if (sub / "stage_2_train_labels.csv").exists() or (sub / "stage_1_train_labels.csv").exists() or len(list(sub.glob("*train_labels.csv"))) > 0:
+                        logger.info(f"Dataset root auto-detected via subfolder scan at: {sub}")
+                        return sub
 
     # 3. Check local raw data directory
     local_raw = get_project_root() / "data" / "raw"
@@ -48,7 +56,6 @@ def find_dataset_root() -> Path:
         logger.info(f"Dataset root auto-detected at local raw directory: {local_raw}")
         return local_raw
 
-    # Fallback to local raw data directory with warning
     logger.warning(f"RSNA dataset labels file not found in standard paths. Defaulting root to: {local_raw}")
     return local_raw
 
@@ -71,10 +78,23 @@ def parse_rsna_manifest(dataset_dir: str | Path | None = None) -> pd.DataFrame:
         dataset_dir = Path(dataset_dir)
 
     labels_csv = dataset_dir / "stage_2_train_labels.csv"
+    if not labels_csv.exists():
+        labels_csv = dataset_dir / "stage_1_train_labels.csv"
+    if not labels_csv.exists():
+        matches = list(dataset_dir.glob("*train_labels.csv"))
+        if len(matches) > 0:
+            labels_csv = matches[0]
+
     class_info_csv = dataset_dir / "stage_2_detailed_class_info.csv"
+    if not class_info_csv.exists():
+        class_info_csv = dataset_dir / "stage_1_detailed_class_info.csv"
+    if not class_info_csv.exists():
+        matches = list(dataset_dir.glob("*class_info.csv"))
+        if len(matches) > 0:
+            class_info_csv = matches[0]
 
     if not labels_csv.exists():
-        raise FileNotFoundError(f"Labels CSV file not found at: {labels_csv}")
+        raise FileNotFoundError(f"Labels CSV file not found at: {labels_csv} in {dataset_dir}")
 
     labels_df = pd.read_csv(labels_csv)
 
