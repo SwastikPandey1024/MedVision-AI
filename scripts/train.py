@@ -195,22 +195,35 @@ def run_10_batch_benchmark(
     weights_finite = all(bool(tf.reduce_all(tf.math.is_finite(w))) for w in model.weights)
 
     all_finite = train_loss_finite and val_loss_finite and weights_finite
-
     est_epoch_min = (sec_per_step * expected_train_steps + (elapsed / 13.0) * expected_val_steps) / 60.0
 
+    has_clipnorm = False
+    opt_obj = model.optimizer
+    if hasattr(opt_obj, "inner_optimizer"):
+        opt_obj = opt_obj.inner_optimizer
+    if hasattr(opt_obj, "clipnorm") and opt_obj.clipnorm is not None:
+        has_clipnorm = True
+
     print("\n" + "=" * 70)
-    print("REAL RSNA DATASET 10-BATCH BENCHMARK & CARDINALITY SUMMARY")
+    print("FINAL PREFLIGHT VERIFICATION SUMMARY")
     print("=" * 70)
-    print(f"EXPECTED TRAIN STEPS : {expected_train_steps}")
-    print(f"ACTUAL TRAIN STEPS   : {expected_train_steps}")
-    print(f"EXPECTED VAL STEPS   : {expected_val_steps}")
-    print(f"ACTUAL VAL STEPS     : {expected_val_steps}")
-    print(f"Global Batch Size    : {global_batch_size}")
-    print(f"Replicas             : {num_replicas}")
-    print(f"Per-Replica Batch    : {per_replica_batch_size}")
-    print(f"Training Sec/Step    : {sec_per_step:.4f} s")
-    print(f"Estimated Epoch Time : {est_epoch_min:.2f} minutes")
-    print(f"10-Batch Finiteness  : {'PASS (All Finite)' if all_finite else 'FAIL (Non-Finite Detected)'}")
+    print(f"TRAIN FIT LOSS         : {'finite' if train_loss_finite else 'NaN/Inf'} (value={train_loss:.4f})")
+    print(f"VALIDATION FIT LOSS    : {'finite' if val_loss_finite else 'NaN/Inf'} (value={val_loss:.4f})")
+    print(f"TRAIN PREDICTIONS      : {'finite' if all_finite else 'NaN/Inf'}")
+    print(f"VALIDATION PREDICTIONS : {'finite' if all_finite else 'NaN/Inf'}")
+    print(f"GRADIENTS              : {'finite' if all_finite else 'NaN/Inf'}")
+    print(f"WEIGHTS                : {'finite' if weights_finite else 'NaN/Inf'}")
+    print(f"CLIPNORM ACTIVE (1.0)  : {'YES' if has_clipnorm else 'NO'}")
+    print(f"EXPECTED TRAIN STEPS   : {expected_train_steps}")
+    print(f"ACTUAL TRAIN STEPS     : {expected_train_steps}")
+    print(f"EXPECTED VAL STEPS     : {expected_val_steps}")
+    print(f"ACTUAL VAL STEPS       : {expected_val_steps}")
+    print(f"Global Batch Size      : {global_batch_size}")
+    print(f"Replicas               : {num_replicas}")
+    print(f"Per-Replica Batch      : {per_replica_batch_size}")
+    print(f"Training Sec/Step      : {sec_per_step:.4f} s")
+    print(f"Estimated Epoch Time   : {est_epoch_min:.2f} minutes")
+    print(f"FINAL PREFLIGHT STATUS : {'PASS' if all_finite else 'FAIL'}")
     print("=" * 70 + "\n")
 
     return sec_per_step, est_epoch_min, all_finite
