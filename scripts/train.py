@@ -34,7 +34,6 @@ from medvision.models.trainer import (
     compute_training_class_weights,
     run_real_batch_diagnostic,
     inspect_10_batch_losses,
-    run_10_batch_benchmark,
 )
 from medvision.evaluation import (
     compute_classification_metrics,
