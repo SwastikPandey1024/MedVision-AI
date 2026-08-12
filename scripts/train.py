@@ -156,58 +156,36 @@ def run_10_batch_benchmark(
     expected_val_steps: int,
     class_weights: Optional[dict] = None,
 ):
-    """Phase D2: Measure real-data 10-batch step throughput and verify total finiteness."""
+    """Phase D2: Measure real-data 10-batch step throughput and verify total finiteness using Keras-native path."""
     logger.info("=" * 75)
     logger.info("REAL RSNA DATASET 10-BATCH PERFORMANCE & FINITENESS BENCHMARK")
     logger.info("=" * 75)
 
-    bce_loss_fn = keras.losses.BinaryCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
-    optimizer = model.optimizer
-
     start_time = time.time()
-    batch_count = 0
-    all_finite = True
-
     with strategy.scope():
-        for step, (x_batch, y_batch) in enumerate(train_ds):
-            if step >= 10:
-                break
-            with tf.GradientTape() as tape:
-                preds = model(x_batch, training=True)
-                preds_f32 = tf.cast(preds, tf.float32)
-                y_f32 = tf.cast(y_batch, tf.float32)
-                raw_loss = tf.reduce_mean(bce_loss_fn(y_f32, preds_f32))
-
-            if not bool(tf.math.is_finite(raw_loss)) or not bool(tf.reduce_all(tf.math.is_finite(preds))):
-                all_finite = False
-                logger.error(f"Non-finite value detected at step {step}: loss={raw_loss.numpy()}")
-
-            grads = tape.gradient(raw_loss, model.trainable_variables)
-            valid_grads = [g for g in grads if g is None or bool(tf.reduce_all(tf.math.is_finite(g)))]
-            if len(valid_grads) < len(grads):
-                all_finite = False
-
-            optimizer.apply_gradients(zip(grads, model.trainable_variables))
-            batch_count += 1
+        history = model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=1,
+            steps_per_epoch=10,
+            validation_steps=3,
+            class_weight=class_weights,
+            verbose=1,
+        )
 
     elapsed = time.time() - start_time
-    sec_per_step = elapsed / max(1, batch_count)
+    sec_per_step = elapsed / 10.0
 
-    v_start = time.time()
-    v_batches = 0
-    with strategy.scope():
-        for v_step, (vx, vy) in enumerate(val_ds):
-            if v_step >= 3:
-                break
-            v_preds = model(vx, training=False)
-            if not bool(tf.reduce_all(tf.math.is_finite(v_preds))):
-                all_finite = False
-            v_batches += 1
+    train_loss = history.history["loss"][-1]
+    val_loss = history.history["val_loss"][-1]
 
-    v_elapsed = time.time() - v_start
-    val_sec_per_step = v_elapsed / max(1, v_batches)
+    train_loss_finite = not (math.isnan(train_loss) or math.isinf(train_loss))
+    val_loss_finite = not (math.isnan(val_loss) or math.isinf(val_loss))
+    weights_finite = all(bool(tf.reduce_all(tf.math.is_finite(w))) for w in model.weights)
 
-    est_epoch_min = (sec_per_step * expected_train_steps + val_sec_per_step * expected_val_steps) / 60.0
+    all_finite = train_loss_finite and val_loss_finite and weights_finite
+
+    est_epoch_min = (sec_per_step * expected_train_steps + (elapsed / 13.0) * expected_val_steps) / 60.0
 
     print("\n" + "=" * 70)
     print("REAL RSNA DATASET 10-BATCH BENCHMARK & CARDINALITY SUMMARY")
@@ -220,7 +198,6 @@ def run_10_batch_benchmark(
     print(f"Replicas             : {num_replicas}")
     print(f"Per-Replica Batch    : {per_replica_batch_size}")
     print(f"Training Sec/Step    : {sec_per_step:.4f} s")
-    print(f"Validation Sec/Step  : {val_sec_per_step:.4f} s")
     print(f"Estimated Epoch Time : {est_epoch_min:.2f} minutes")
     print(f"10-Batch Finiteness  : {'PASS (All Finite)' if all_finite else 'FAIL (Non-Finite Detected)'}")
     print("=" * 70 + "\n")
@@ -301,8 +278,12 @@ def main():
     # Compute Explicit Cardinality & Expected Steps (CTO Requirement A)
     n_train = len(df_train) if df_train is not None else 0
     n_val = len(df_val) if df_val is not None else 0
-    expected_train_steps = math.ceil(n_train / global_batch_size) if n_train > 0 else 292
-    expected_val_steps = math.ceil(n_val / global_batch_size) if n_val > 0 else 63
+    if args.smoke_test:
+        expected_train_steps = 4
+        expected_val_steps = 2
+    else:
+        expected_train_steps = math.ceil(n_train / global_batch_size) if n_train > 0 else 292
+        expected_val_steps = math.ceil(n_val / global_batch_size) if n_val > 0 else 63
 
     logger.info("=" * 70)
     logger.info("BATCH SIZE & CARDINALITY SPECIFICATION")

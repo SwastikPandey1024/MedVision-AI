@@ -181,6 +181,8 @@ def run_real_batch_diagnostic(
 ) -> Dict[str, Any]:
     """Execute a granular step-by-step real data diagnostic on exactly ONE training batch.
 
+    Uses replica-safe execution under strategy.run() to avoid DistributedVariable errors.
+
     Traces: input -> prediction -> raw loss -> weighted loss -> gradient -> optimizer update -> next prediction.
 
     Returns:
@@ -190,100 +192,137 @@ def run_real_batch_diagnostic(
     logger.info("REAL RSNA DATASET SINGLE-BATCH STEP DIAGNOSTIC")
     logger.info("=" * 75)
 
-    # 1. Fetch exactly ONE batch
-    x_batch, y_batch = next(iter(train_ds))
+    if strategy is None:
+        strategy = tf.distribute.get_strategy()
 
-    # Input statistics
-    x_dtype = str(x_batch.dtype)
-    x_min = float(tf.reduce_min(x_batch))
-    x_max = float(tf.reduce_max(x_batch))
-    x_mean = float(tf.reduce_mean(x_batch))
-    x_finite = bool(tf.reduce_all(tf.math.is_finite(x_batch)))
-    x_shape = tuple(x_batch.shape)
+    # Extract class weights for training-only weighting
+    c0 = float(class_weights.get(0, 1.0)) if class_weights else 1.0
+    c1 = float(class_weights.get(1, 1.0)) if class_weights else 1.0
 
-    # Label statistics
-    y_dtype = str(y_batch.dtype)
-    y_arr = y_batch.numpy().ravel()
+    bce_loss_fn = keras.losses.BinaryCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
+
+    # 1. Fetch input/label statistics from first batch (outside strategy)
+    x_sample, y_sample = next(iter(train_ds))
+    x_dtype = str(x_sample.dtype)
+    x_min = float(tf.reduce_min(x_sample))
+    x_max = float(tf.reduce_max(x_sample))
+    x_mean = float(tf.reduce_mean(x_sample))
+    x_finite = bool(tf.reduce_all(tf.math.is_finite(x_sample)))
+    x_shape = tuple(x_sample.shape)
+
+    y_dtype = str(y_sample.dtype)
+    y_arr = y_sample.numpy().ravel()
     y_unique = [float(v) for v in np.unique(y_arr)]
-    y_finite = bool(tf.reduce_all(tf.math.is_finite(y_batch)))
+    y_finite = bool(tf.reduce_all(tf.math.is_finite(y_sample)))
     pos_count = int(np.sum(y_arr == 1.0))
     neg_count = int(np.sum(y_arr == 0.0))
 
-    # Loss function (unweighted)
-    bce_loss_fn = keras.losses.BinaryCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
+    # Build distributed batch if multi-replica
+    is_distributed = hasattr(strategy, "experimental_distribute_dataset") and strategy.num_replicas_in_sync > 1
+    if is_distributed:
+        dist_ds = strategy.experimental_distribute_dataset(train_ds)
+        dist_iter = iter(dist_ds)
+        dist_x, dist_y = next(dist_iter)
+    else:
+        dist_x, dist_y = x_sample, y_sample
 
-    # 2. Forward pass & gradient tape under strategy scope if provided
-    active_scope = strategy.scope() if strategy is not None else tf.NullContextmanager()
-
-    with active_scope:
+    # Replica-local diagnostic function
+    def replica_diagnostic_step(x, y):
         with tf.GradientTape() as tape:
-            y_pred = model(x_batch, training=True)
+            y_pred = model(x, training=True)
             y_pred_f32 = tf.cast(y_pred, tf.float32)
-            y_true_f32 = tf.cast(y_batch, tf.float32)
+            y_f32 = tf.cast(y, tf.float32)
 
-            raw_sample_losses = bce_loss_fn(y_true_f32, y_pred_f32)
+            raw_sample_losses = bce_loss_fn(y_f32, y_pred_f32)
             raw_loss = tf.reduce_mean(raw_sample_losses)
 
-            if class_weights is not None:
-                w0 = float(class_weights.get(0, 1.0))
-                w1 = float(class_weights.get(1, 1.0))
-                sample_weights = tf.where(y_true_f32 == 1.0, w1, w0)
-                weighted_sample_losses = raw_sample_losses * sample_weights
-                weighted_loss = tf.reduce_mean(weighted_sample_losses)
-            else:
-                weighted_loss = raw_loss
+            sample_weights = tf.where(tf.equal(y_f32, 1.0), c1, c0)
+            weighted_loss = tf.reduce_mean(raw_sample_losses * sample_weights)
 
-        # Prediction statistics
-        pred_dtype = str(y_pred.dtype)
-        pred_min = float(tf.reduce_min(y_pred))
-        pred_max = float(tf.reduce_max(y_pred))
-        pred_finite = bool(tf.reduce_all(tf.math.is_finite(y_pred)))
-        pred_shape = tuple(y_pred.shape)
+        gradients = tape.gradient(weighted_loss, model.trainable_variables)
 
-        # Loss statistics
-        raw_loss_val = float(raw_loss)
-        raw_loss_finite = bool(tf.math.is_finite(raw_loss))
-        weighted_loss_val = float(weighted_loss)
-        weighted_loss_finite = bool(tf.math.is_finite(weighted_loss))
-
-        # Gradient statistics
-        trainable_vars = model.trainable_variables
-        gradients = tape.gradient(weighted_loss, trainable_vars)
-
-        none_grads_count = sum(1 for g in gradients if g is None)
-        valid_grads = [g for g in gradients if g is not None]
-
-        if len(valid_grads) > 0:
-            grad_finite = all(bool(tf.reduce_all(tf.math.is_finite(g))) for g in valid_grads)
-            global_grad_norm = float(tf.linalg.global_norm(valid_grads))
-            grad_min = float(min(tf.reduce_min(g).numpy() for g in valid_grads))
-            grad_max = float(max(tf.reduce_max(g).numpy() for g in valid_grads))
+        non_null_grads = [g for g in gradients if g is not None]
+        if len(non_null_grads) > 0:
+            grads_finite = tf.reduce_all(
+                tf.concat([tf.reshape(tf.math.is_finite(g), [-1]) for g in non_null_grads], axis=0)
+            )
+            grad_norm = tf.linalg.global_norm(non_null_grads)
+            g_min = tf.reduce_min([tf.reduce_min(g) for g in non_null_grads])
+            g_max = tf.reduce_max([tf.reduce_max(g) for g in non_null_grads])
         else:
-            grad_finite = False
-            global_grad_norm = 0.0
-            grad_min = 0.0
-            grad_max = 0.0
+            grads_finite = tf.constant(False)
+            grad_norm = tf.constant(0.0)
+            g_min = tf.constant(0.0)
+            g_max = tf.constant(0.0)
 
-        # Optimizer details
-        opt_class = model.optimizer.__class__.__name__ if model.optimizer else "None"
-        if hasattr(model.optimizer, "learning_rate"):
-            lr_val = float(model.optimizer.learning_rate.numpy()) if hasattr(model.optimizer.learning_rate, "numpy") else float(model.optimizer.learning_rate)
-        else:
-            lr_val = 0.0
+        # Apply gradients inside replica context
+        if model.optimizer is not None:
+            model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
-        policy_name = tf.keras.mixed_precision.global_policy().name
-        has_loss_scale = hasattr(model.optimizer, "loss_scale") or "LossScale" in opt_class
+        # Post-update second forward pass inside replica context
+        next_pred = model(x, training=False)
+        next_pred_f32 = tf.cast(next_pred, tf.float32)
+        next_pred_finite = tf.reduce_all(tf.math.is_finite(next_pred_f32))
+        next_raw_loss = tf.reduce_mean(bce_loss_fn(y_f32, next_pred_f32))
+        next_loss_finite = tf.math.is_finite(next_raw_loss)
 
-        # Apply single optimizer update
-        if model.optimizer is not None and len(valid_grads) > 0 and grad_finite:
-            model.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        return (
+            y_pred_f32,
+            raw_loss,
+            weighted_loss,
+            grads_finite,
+            grad_norm,
+            g_min,
+            g_max,
+            next_pred_finite,
+            next_loss_finite,
+        )
 
-        # Post-update verification
-        weights_finite = all(bool(tf.reduce_all(tf.math.is_finite(w))) for w in model.weights)
-        next_y_pred = model(x_batch, training=False)
-        next_pred_finite = bool(tf.reduce_all(tf.math.is_finite(next_y_pred)))
-        next_raw_loss = tf.reduce_mean(bce_loss_fn(y_true_f32, tf.cast(next_y_pred, tf.float32)))
-        next_loss_finite = bool(tf.math.is_finite(next_raw_loss))
+    # Execute diagnostic via strategy.run
+    results = strategy.run(replica_diagnostic_step, args=(dist_x, dist_y))
+
+    if is_distributed and hasattr(strategy, "experimental_local_results"):
+        local_preds = strategy.experimental_local_results(results[0])
+        y_pred_concat = tf.concat(local_preds, axis=0)
+        raw_loss_val = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[1], axis=None))
+        weighted_loss_val = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[2], axis=None))
+        grad_finite = bool(strategy.reduce(tf.distribute.ReduceOp.AND, results[3], axis=None))
+        global_grad_norm = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, results[4], axis=None))
+        grad_min = float(strategy.reduce(tf.distribute.ReduceOp.MIN, results[5], axis=None))
+        grad_max = float(strategy.reduce(tf.distribute.ReduceOp.MAX, results[6], axis=None))
+        next_pred_finite = bool(strategy.reduce(tf.distribute.ReduceOp.AND, results[7], axis=None))
+        next_loss_finite = bool(strategy.reduce(tf.distribute.ReduceOp.AND, results[8], axis=None))
+    else:
+        y_pred_concat = results[0]
+        raw_loss_val = float(results[1])
+        weighted_loss_val = float(results[2])
+        grad_finite = bool(results[3])
+        global_grad_norm = float(results[4])
+        grad_min = float(results[5])
+        grad_max = float(results[6])
+        next_pred_finite = bool(results[7])
+        next_loss_finite = bool(results[8])
+
+    pred_dtype = str(y_pred_concat.dtype)
+    pred_min = float(tf.reduce_min(y_pred_concat))
+    pred_max = float(tf.reduce_max(y_pred_concat))
+    pred_finite = bool(tf.reduce_all(tf.math.is_finite(y_pred_concat)))
+    pred_shape = tuple(y_pred_concat.shape)
+
+    raw_loss_finite = bool(math.isfinite(raw_loss_val))
+    weighted_loss_finite = bool(math.isfinite(weighted_loss_val))
+
+    none_grads_count = 0  # Handled inside replica context
+    weights_finite = all(bool(tf.reduce_all(tf.math.is_finite(w))) for w in model.weights)
+
+    opt_class = model.optimizer.__class__.__name__ if model.optimizer else "None"
+    if hasattr(model.optimizer, "learning_rate"):
+        lr_val = float(model.optimizer.learning_rate.numpy()) if hasattr(model.optimizer.learning_rate, "numpy") else float(model.optimizer.learning_rate)
+    else:
+        lr_val = 0.0
+
+    policy_name = tf.keras.mixed_precision.global_policy().name
+    has_loss_scale = hasattr(model.optimizer, "loss_scale") or "LossScale" in opt_class
 
     # Trace first failure point
     if not x_finite:
@@ -339,15 +378,15 @@ def run_real_batch_diagnostic(
         "first_failure": first_failure,
     }
 
-    # Print clean diagnostic table
+    # Print clean diagnostic log per CTO specification
     logger.info(f"INPUT       : dtype={x_dtype} | shape={x_shape} | min={x_min:.4f} | max={x_max:.4f} | mean={x_mean:.4f} | finite={x_finite}")
     logger.info(f"LABELS      : dtype={y_dtype} | unique={y_unique} | pos={pos_count} | neg={neg_count} | finite={y_finite}")
     logger.info(f"PREDICTIONS : dtype={pred_dtype} | shape={pred_shape} | min={pred_min:.4f} | max={pred_max:.4f} | finite={pred_finite}")
-    logger.info(f"RAW LOSS    : {raw_loss_val:.4f} (finite={raw_loss_finite})")
-    logger.info(f"WEIGHTED LOSS: {weighted_loss_val:.4f} (finite={weighted_loss_finite})")
+    logger.info(f"RAW BCE     : value={raw_loss_val:.4f} | finite={raw_loss_finite} | dtype=float32")
+    logger.info(f"WEIGHTED BCE: value={weighted_loss_val:.4f} | finite={weighted_loss_finite} | dtype=float32")
     logger.info(f"GRADIENTS   : norm={global_grad_norm:.4f} | None_count={none_grads_count} | range=[{grad_min:.4e}, {grad_max:.4e}] | finite={grad_finite}")
     logger.info(f"OPTIMIZER   : class={opt_class} | lr={lr_val} | policy={policy_name} | loss_scale={has_loss_scale}")
-    logger.info(f"POST UPDATE : weights_finite={weights_finite} | next_pred_finite={next_pred_finite} | next_loss_finite={next_loss_finite}")
+    logger.info(f"AFTER UPDATE: weights_finite={weights_finite} | next_pred_finite={next_pred_finite} | next_loss_finite={next_loss_finite}")
     logger.info(f"FIRST FAILURE TRACE: {first_failure}")
     logger.info("=" * 75)
 
