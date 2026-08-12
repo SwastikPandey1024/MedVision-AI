@@ -112,6 +112,28 @@ def compute_training_class_weights(train_manifest_df: pd.DataFrame) -> Dict[int,
     return class_weights
 
 
+class BatchLossTrackerCallback(keras.callbacks.Callback):
+    """Custom callback to log per-batch loss and metrics during model.fit()."""
+
+    def on_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None):
+        logs = logs or {}
+        loss_val = logs.get("loss")
+        loss_str = (
+            f"{loss_val:.4f}"
+            if isinstance(loss_val, (int, float)) and not math.isnan(loss_val)
+            else str(loss_val)
+        )
+        logger.info(f"[BATCH {batch + 1:02d} END] fit_loss={loss_str}")
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
+        logs = logs or {}
+        loss_val = logs.get("loss")
+        val_loss_val = logs.get("val_loss")
+        logger.info(
+            f"[EPOCH {epoch + 1:02d} END] train_loss={loss_val} | val_loss={val_loss_val}"
+        )
+
+
 def build_callbacks(
     checkpoint_filepath: str,
     tensorboard_dir: str,
@@ -121,26 +143,13 @@ def build_callbacks(
     early_stopping_patience: int = 5,
     reduce_lr_patience: int = 3,
 ) -> list:
-    """Construct full suite of Keras training callbacks including NaN guards.
-
-    Args:
-        checkpoint_filepath: Destination path for best model checkpoint (.keras).
-        tensorboard_dir: Directory for TensorBoard event logs.
-        csv_log_path: Path for CSVLogger metric output.
-        monitor_metric: Primary metric to monitor ('val_pr_auc').
-        mode: Metric optimization mode ('max' for PR-AUC).
-        early_stopping_patience: Epoch patience before early stopping.
-        reduce_lr_patience: Epoch patience before LR reduction.
-
-    Returns:
-        List of initialized Keras Callback objects.
-    """
+    """Construct full suite of Keras training callbacks including NaN guards."""
     os.makedirs(os.path.dirname(checkpoint_filepath), exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
     os.makedirs(os.path.dirname(csv_log_path), exist_ok=True)
 
     callbacks = [
-        # Hard NaN Termination Callbacks
+        BatchLossTrackerCallback(),
         keras.callbacks.TerminateOnNaN(),
         NaNGuardCallback(),
         # Save best model based on val_pr_auc

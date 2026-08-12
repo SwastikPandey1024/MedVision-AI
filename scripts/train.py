@@ -381,6 +381,116 @@ def main():
         logger.info("Phase 3/4 GPU Smoke Test finished SUCCESSFULLY.")
         return
 
+    # EXPERIMENT A BRANCH: Fresh Model + Fresh Dataset + model.fit ONLY (No diagnostics before fit)
+    if args.stage == "exp_a":
+        logger.info("=" * 75)
+        logger.info("EXPERIMENT A: FRESH MODEL + FRESH DATASET + model.fit ONLY (10 BATCHES)")
+        logger.info("=" * 75)
+        callbacks = build_callbacks(
+            checkpoint_filepath=str(root / "artifacts" / "experiments" / "exp_a_best.keras"),
+            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "exp_a"),
+            csv_log_path=str(root / "artifacts" / "experiments" / "exp_a_history.csv"),
+            monitor_metric="val_pr_auc",
+            mode="max",
+        )
+        with strategy.scope():
+            history = model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=1,
+                steps_per_epoch=10,
+                validation_steps=3,
+                class_weight=class_weights,
+                callbacks=callbacks,
+                verbose=1,
+            )
+        loss_end = history.history["loss"][-1]
+        val_loss_end = history.history["val_loss"][-1]
+        logger.info("=" * 75)
+        logger.info(f"EXPERIMENT A RESULT: train_loss={loss_end:.4f} | val_loss={val_loss_end:.4f}")
+        logger.info(f"EXPERIMENT A STATUS: {'PASS' if math.isfinite(loss_end) and math.isfinite(val_loss_end) else 'FAIL (NaN)'}")
+        logger.info("=" * 75)
+        return
+
+    if args.stage == "exp_b":
+        logger.info("=" * 75)
+        logger.info("EXPERIMENT B: DIAGNOSTICS + RE-INITIALIZATION + 10-BATCH model.fit()")
+        logger.info("=" * 75)
+
+        # Phase D: Single-Batch Step Diagnostic
+        diag_results = run_real_batch_diagnostic(
+            model=model,
+            train_ds=train_ds,
+            class_weights=class_weights,
+            strategy=strategy,
+        )
+
+        # Phase D2: 10-Batch Real RSNA Benchmark
+        sec_per_step, est_epoch_min, is_finite = run_10_batch_benchmark(
+            model=model,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            strategy=strategy,
+            global_batch_size=global_batch_size,
+            num_replicas=num_replicas,
+            per_replica_batch_size=per_replica_batch_size,
+            expected_train_steps=expected_train_steps,
+            expected_val_steps=expected_val_steps,
+            class_weights=class_weights,
+        )
+
+        logger.info("Re-initializing fresh model and fresh dataset iterators for Experiment B model.fit()...")
+        if args.mode == "full":
+            train_ds, val_ds, _ = create_real_rsna_dataset(
+                df_train=df_train,
+                df_val=df_val,
+                df_test=df_test,
+                batch_size=global_batch_size,
+                target_size=(224, 224),
+            )
+        else:
+            train_ds, val_ds, _ = load_dev_subset_datasets(
+                batch_size=global_batch_size,
+                target_size=(224, 224),
+            )
+
+        with strategy.scope():
+            fresh_model = build_model(
+                architecture=args.architecture,
+                input_shape=(224, 224, 3),
+                num_classes=1,
+                config=config,
+                compile_model=True,
+                strategy=strategy,
+            )
+
+        callbacks = build_callbacks(
+            checkpoint_filepath=str(root / "artifacts" / "experiments" / "exp_b_best.keras"),
+            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "exp_b"),
+            csv_log_path=str(root / "artifacts" / "experiments" / "exp_b_history.csv"),
+            monitor_metric="val_pr_auc",
+            mode="max",
+        )
+
+        history = fresh_model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=1,
+            steps_per_epoch=10,
+            validation_steps=3,
+            class_weight=class_weights,
+            callbacks=callbacks,
+            verbose=1,
+        )
+
+        loss_end = history.history["loss"][-1]
+        val_loss_end = history.history["val_loss"][-1]
+        logger.info("=" * 75)
+        logger.info(f"EXPERIMENT B RESULT: train_loss={loss_end:.4f} | val_loss={val_loss_end:.4f}")
+        logger.info(f"EXPERIMENT B STATUS: {'PASS' if math.isfinite(loss_end) and math.isfinite(val_loss_end) else 'FAIL (NaN)'}")
+        logger.info("=" * 75)
+        return
+
     # Phase D: Single-Batch Step Diagnostic (CTO Requirement D)
     diag_results = run_real_batch_diagnostic(
         model=model,
