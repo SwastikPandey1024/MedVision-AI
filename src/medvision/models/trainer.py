@@ -1,8 +1,9 @@
-"""Training execution engine and callbacks orchestrator for MedVision-AI."""
+"""Training execution engine, callbacks orchestrator, and batch diagnostics for MedVision-AI."""
 
 import os
+import math
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
 import numpy as np
 import keras
@@ -12,6 +13,53 @@ from medvision.config.settings import get_project_root
 from medvision.utils.logger import get_logger
 
 logger = get_logger("medvision.models.trainer")
+
+
+class NaNGuardCallback(keras.callbacks.Callback):
+    """Hard runtime guard to immediately terminate training on NaN/Inf loss and log context."""
+
+    def __init__(self):
+        super().__init__()
+        self.first_bad_epoch: Optional[int] = None
+        self.first_bad_step: Optional[int] = None
+
+    def on_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None):
+        logs = logs or {}
+        loss = logs.get("loss")
+        if loss is not None and (math.isnan(loss) or math.isinf(loss)):
+            self.first_bad_step = batch + 1
+            logger.error("=" * 75)
+            logger.error("HARD NAN GUARD ACTIVATED AT BATCH END!")
+            logger.error(f"First Bad Step : {self.first_bad_step}")
+            logger.error(f"Reported Loss  : {loss}")
+            logger.error("Terminating current training stage immediately to prevent GPU resource waste.")
+            logger.error("=" * 75)
+            self.model.stop_training = True
+            raise RuntimeError(f"HARD NAN GUARD: Training loss became non-finite ({loss}) at step {self.first_bad_step}!")
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
+        logs = logs or {}
+        loss = logs.get("loss")
+        val_loss = logs.get("val_loss")
+        if loss is not None and (math.isnan(loss) or math.isinf(loss)):
+            self.first_bad_epoch = epoch + 1
+            logger.error("=" * 75)
+            logger.error("HARD NAN GUARD ACTIVATED AT EPOCH END!")
+            logger.error(f"First Bad Epoch : {self.first_bad_epoch}")
+            logger.error(f"Train Loss      : {loss}")
+            logger.error("=" * 75)
+            self.model.stop_training = True
+            raise RuntimeError(f"HARD NAN GUARD: Training loss became non-finite ({loss}) at epoch {self.first_bad_epoch}!")
+
+        if val_loss is not None and (math.isnan(val_loss) or math.isinf(val_loss)):
+            self.first_bad_epoch = epoch + 1
+            logger.error("=" * 75)
+            logger.error("HARD NAN GUARD ACTIVATED AT EPOCH END!")
+            logger.error(f"First Bad Epoch : {self.first_bad_epoch}")
+            logger.error(f"Val Loss        : {val_loss}")
+            logger.error("=" * 75)
+            self.model.stop_training = True
+            raise RuntimeError(f"HARD NAN GUARD: Validation loss became non-finite ({val_loss}) at epoch {self.first_bad_epoch}!")
 
 
 def compute_training_class_weights(train_manifest_df: pd.DataFrame) -> Dict[int, float]:
@@ -63,10 +111,7 @@ def build_callbacks(
     early_stopping_patience: int = 5,
     reduce_lr_patience: int = 3,
 ) -> list:
-    """Construct full suite of Keras training callbacks.
-
-    CRITICAL CTO REQUIREMENT:
-    Uses `val_pr_auc` as primary checkpointing & early stopping metric.
+    """Construct full suite of Keras training callbacks including NaN guards.
 
     Args:
         checkpoint_filepath: Destination path for best model checkpoint (.keras).
@@ -85,6 +130,9 @@ def build_callbacks(
     os.makedirs(os.path.dirname(csv_log_path), exist_ok=True)
 
     callbacks = [
+        # Hard NaN Termination Callbacks
+        keras.callbacks.TerminateOnNaN(),
+        NaNGuardCallback(),
         # Save best model based on val_pr_auc
         keras.callbacks.ModelCheckpoint(
             filepath=checkpoint_filepath,
@@ -125,23 +173,208 @@ def build_callbacks(
     return callbacks
 
 
+def run_real_batch_diagnostic(
+    model: keras.Model,
+    train_ds: tf.data.Dataset,
+    class_weights: Optional[Dict[int, float]] = None,
+    strategy: Optional[tf.distribute.Strategy] = None,
+) -> Dict[str, Any]:
+    """Execute a granular step-by-step real data diagnostic on exactly ONE training batch.
+
+    Traces: input -> prediction -> raw loss -> weighted loss -> gradient -> optimizer update -> next prediction.
+
+    Returns:
+        Dictionary containing granular diagnostic fields and finite flags per stage.
+    """
+    logger.info("=" * 75)
+    logger.info("REAL RSNA DATASET SINGLE-BATCH STEP DIAGNOSTIC")
+    logger.info("=" * 75)
+
+    # 1. Fetch exactly ONE batch
+    x_batch, y_batch = next(iter(train_ds))
+
+    # Input statistics
+    x_dtype = str(x_batch.dtype)
+    x_min = float(tf.reduce_min(x_batch))
+    x_max = float(tf.reduce_max(x_batch))
+    x_mean = float(tf.reduce_mean(x_batch))
+    x_finite = bool(tf.reduce_all(tf.math.is_finite(x_batch)))
+    x_shape = tuple(x_batch.shape)
+
+    # Label statistics
+    y_dtype = str(y_batch.dtype)
+    y_arr = y_batch.numpy().ravel()
+    y_unique = [float(v) for v in np.unique(y_arr)]
+    y_finite = bool(tf.reduce_all(tf.math.is_finite(y_batch)))
+    pos_count = int(np.sum(y_arr == 1.0))
+    neg_count = int(np.sum(y_arr == 0.0))
+
+    # Loss function (unweighted)
+    bce_loss_fn = keras.losses.BinaryCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
+
+    # 2. Forward pass & gradient tape under strategy scope if provided
+    active_scope = strategy.scope() if strategy is not None else tf.NullContextmanager()
+
+    with active_scope:
+        with tf.GradientTape() as tape:
+            y_pred = model(x_batch, training=True)
+            y_pred_f32 = tf.cast(y_pred, tf.float32)
+            y_true_f32 = tf.cast(y_batch, tf.float32)
+
+            raw_sample_losses = bce_loss_fn(y_true_f32, y_pred_f32)
+            raw_loss = tf.reduce_mean(raw_sample_losses)
+
+            if class_weights is not None:
+                w0 = float(class_weights.get(0, 1.0))
+                w1 = float(class_weights.get(1, 1.0))
+                sample_weights = tf.where(y_true_f32 == 1.0, w1, w0)
+                weighted_sample_losses = raw_sample_losses * sample_weights
+                weighted_loss = tf.reduce_mean(weighted_sample_losses)
+            else:
+                weighted_loss = raw_loss
+
+        # Prediction statistics
+        pred_dtype = str(y_pred.dtype)
+        pred_min = float(tf.reduce_min(y_pred))
+        pred_max = float(tf.reduce_max(y_pred))
+        pred_finite = bool(tf.reduce_all(tf.math.is_finite(y_pred)))
+        pred_shape = tuple(y_pred.shape)
+
+        # Loss statistics
+        raw_loss_val = float(raw_loss)
+        raw_loss_finite = bool(tf.math.is_finite(raw_loss))
+        weighted_loss_val = float(weighted_loss)
+        weighted_loss_finite = bool(tf.math.is_finite(weighted_loss))
+
+        # Gradient statistics
+        trainable_vars = model.trainable_variables
+        gradients = tape.gradient(weighted_loss, trainable_vars)
+
+        none_grads_count = sum(1 for g in gradients if g is None)
+        valid_grads = [g for g in gradients if g is not None]
+
+        if len(valid_grads) > 0:
+            grad_finite = all(bool(tf.reduce_all(tf.math.is_finite(g))) for g in valid_grads)
+            global_grad_norm = float(tf.linalg.global_norm(valid_grads))
+            grad_min = float(min(tf.reduce_min(g).numpy() for g in valid_grads))
+            grad_max = float(max(tf.reduce_max(g).numpy() for g in valid_grads))
+        else:
+            grad_finite = False
+            global_grad_norm = 0.0
+            grad_min = 0.0
+            grad_max = 0.0
+
+        # Optimizer details
+        opt_class = model.optimizer.__class__.__name__ if model.optimizer else "None"
+        if hasattr(model.optimizer, "learning_rate"):
+            lr_val = float(model.optimizer.learning_rate.numpy()) if hasattr(model.optimizer.learning_rate, "numpy") else float(model.optimizer.learning_rate)
+        else:
+            lr_val = 0.0
+
+        policy_name = tf.keras.mixed_precision.global_policy().name
+        has_loss_scale = hasattr(model.optimizer, "loss_scale") or "LossScale" in opt_class
+
+        # Apply single optimizer update
+        if model.optimizer is not None and len(valid_grads) > 0 and grad_finite:
+            model.optimizer.apply_gradients(zip(gradients, trainable_vars))
+
+        # Post-update verification
+        weights_finite = all(bool(tf.reduce_all(tf.math.is_finite(w))) for w in model.weights)
+        next_y_pred = model(x_batch, training=False)
+        next_pred_finite = bool(tf.reduce_all(tf.math.is_finite(next_y_pred)))
+        next_raw_loss = tf.reduce_mean(bce_loss_fn(y_true_f32, tf.cast(next_y_pred, tf.float32)))
+        next_loss_finite = bool(tf.math.is_finite(next_raw_loss))
+
+    # Trace first failure point
+    if not x_finite:
+        first_failure = "input"
+    elif not pred_finite:
+        first_failure = "prediction"
+    elif not raw_loss_finite:
+        first_failure = "raw loss"
+    elif not weighted_loss_finite:
+        first_failure = "weighted loss"
+    elif not grad_finite:
+        first_failure = "gradient"
+    elif not weights_finite:
+        first_failure = "optimizer update"
+    elif not next_pred_finite or not next_loss_finite:
+        first_failure = "next prediction"
+    else:
+        first_failure = "NONE (ALL STAGES FINITE)"
+
+    diag = {
+        "x_dtype": x_dtype,
+        "x_min": x_min,
+        "x_max": x_max,
+        "x_mean": x_mean,
+        "x_finite": x_finite,
+        "x_shape": x_shape,
+        "y_dtype": y_dtype,
+        "y_unique": y_unique,
+        "y_finite": y_finite,
+        "pos_count": pos_count,
+        "neg_count": neg_count,
+        "pred_dtype": pred_dtype,
+        "pred_min": pred_min,
+        "pred_max": pred_max,
+        "pred_finite": pred_finite,
+        "pred_shape": pred_shape,
+        "raw_loss": raw_loss_val,
+        "raw_loss_finite": raw_loss_finite,
+        "weighted_loss": weighted_loss_val,
+        "weighted_loss_finite": weighted_loss_finite,
+        "grad_finite": grad_finite,
+        "none_grads_count": none_grads_count,
+        "global_grad_norm": global_grad_norm,
+        "grad_min": grad_min,
+        "grad_max": grad_max,
+        "optimizer_class": opt_class,
+        "learning_rate": lr_val,
+        "mixed_precision_policy": policy_name,
+        "has_loss_scale": has_loss_scale,
+        "post_update_weights_finite": weights_finite,
+        "post_update_pred_finite": next_pred_finite,
+        "post_update_loss_finite": next_loss_finite,
+        "first_failure": first_failure,
+    }
+
+    # Print clean diagnostic table
+    logger.info(f"INPUT       : dtype={x_dtype} | shape={x_shape} | min={x_min:.4f} | max={x_max:.4f} | mean={x_mean:.4f} | finite={x_finite}")
+    logger.info(f"LABELS      : dtype={y_dtype} | unique={y_unique} | pos={pos_count} | neg={neg_count} | finite={y_finite}")
+    logger.info(f"PREDICTIONS : dtype={pred_dtype} | shape={pred_shape} | min={pred_min:.4f} | max={pred_max:.4f} | finite={pred_finite}")
+    logger.info(f"RAW LOSS    : {raw_loss_val:.4f} (finite={raw_loss_finite})")
+    logger.info(f"WEIGHTED LOSS: {weighted_loss_val:.4f} (finite={weighted_loss_finite})")
+    logger.info(f"GRADIENTS   : norm={global_grad_norm:.4f} | None_count={none_grads_count} | range=[{grad_min:.4e}, {grad_max:.4e}] | finite={grad_finite}")
+    logger.info(f"OPTIMIZER   : class={opt_class} | lr={lr_val} | policy={policy_name} | loss_scale={has_loss_scale}")
+    logger.info(f"POST UPDATE : weights_finite={weights_finite} | next_pred_finite={next_pred_finite} | next_loss_finite={next_loss_finite}")
+    logger.info(f"FIRST FAILURE TRACE: {first_failure}")
+    logger.info("=" * 75)
+
+    return diag
+
+
 def train_model(
     model: keras.Model,
     train_ds: tf.data.Dataset,
     val_ds: tf.data.Dataset,
     epochs: int = 15,
+    steps_per_epoch: Optional[int] = None,
+    validation_steps: Optional[int] = None,
     class_weights: Optional[Dict[int, float]] = None,
     checkpoint_filepath: Optional[str] = None,
     experiment_name: str = "exp_baseline_001",
     config: Optional[Dict[str, Any]] = None,
 ) -> keras.callbacks.History:
-    """Execute model training with callbacks and class weights.
+    """Execute model training with callbacks, class weights, and explicit cardinality bounds.
 
     Args:
         model: Compiled Keras model instance.
         train_ds: Training tf.data.Dataset.
         val_ds: Validation tf.data.Dataset.
         epochs: Maximum training epochs.
+        steps_per_epoch: Explicit steps per training epoch (REQUIRED for repeating datasets).
+        validation_steps: Explicit validation steps per epoch.
         class_weights: Optional dictionary of class weights.
         checkpoint_filepath: Optional custom model checkpoint path.
         experiment_name: Identifier for experiment tracking.
@@ -175,12 +408,16 @@ def train_model(
     )
 
     logger.info(f"Starting model training for {epochs} epochs on experiment '{experiment_name}'...")
-    logger.info(f"Checkpoint destination: {checkpoint_filepath}")
+    logger.info(f"Checkpoint destination  : {checkpoint_filepath}")
+    logger.info(f"Configured steps_per_epoch : {steps_per_epoch}")
+    logger.info(f"Configured validation_steps: {validation_steps}")
 
     history = model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
         class_weight=class_weights,
         callbacks=callbacks,
         verbose=1,

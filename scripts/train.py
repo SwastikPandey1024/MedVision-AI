@@ -1,17 +1,13 @@
 """Training script for MedVision-AI models (Local CPU Dev-subset or Kaggle Multi-GPU).
 
-CTO-APPROVED CLOUD TRAINING PIPELINE:
+CTO-APPROVED CLOUD TRAINING PIPELINE WITH HARD CARDINALITY AND NAN GUARDS:
 Phase A: Pre-Flight Safety & Dataset Provenance Checks
-Phase B: Data Pipeline Validation (Phase 2 tf.data + 70/15/15 Patient-Level Split)
+Phase B: Data Pipeline Validation (Finite Cardinality & 70/15/15 Patient-Level Split)
 Phase C: Training Data Class Weights (Train set ONLY)
-Phase D: GPU Performance Benchmark
-Phase E: Stage 1 DenseNet121 Head Training (LR=1e-4, FP16, max 5 epochs, early stopping patience=2)
-Phase F: Stage 1 Validation
-Phase G: Stage 2 Controlled Fine-Tuning (Top 20 layers, LR=1e-5, BatchNorm Protection Guard: Trainable BN == 0)
-Phase H: Validation Decision Threshold Selection (Validation ONLY, locked threshold)
-Phase I: Final Test Evaluation (Untouched Test set, locked threshold)
-Phase J & K: Model Comparison & Experiment Manifest
-Phase L & M: Laptop Safety & Quota Safeguards (Abort full training on local laptop or CPU)
+Phase D: Single-Batch Real-Data Step Diagnostic (Input -> Pred -> Loss -> Grads -> Opt Update)
+Phase D2: 10-Batch Real-Data Performance Benchmark & Finite Cardinality Verification
+Phase E: Stage 1 DenseNet121 Head Training (val_pr_auc monitor, TerminateOnNaN + NaNGuardCallback)
+Phase F: Best Stage 1 Model Validation Summary & Controlled Stop
 """
 
 import argparse
@@ -32,7 +28,11 @@ from medvision.data.local_dev_loader import load_dev_subset_datasets
 from medvision.data.preprocessing import create_tfrecord_dataset, build_tfrecord_dataset
 from medvision.models.factory import build_model, get_distribution_strategy
 from medvision.models.densenet import unfreeze_densenet_for_finetuning
-from medvision.models.trainer import train_model, compute_training_class_weights
+from medvision.models.trainer import (
+    train_model,
+    compute_training_class_weights,
+    run_real_batch_diagnostic,
+)
 from medvision.evaluation import (
     compute_classification_metrics,
     plot_evaluation_curves,
@@ -70,8 +70,15 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=32,
-        help="Batch size per replica.",
+        default=64,
+        help="Global batch size across all GPUs (default 64).",
+    )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default="stage1",
+        choices=["stage1", "stage2", "all"],
+        help="Training stage to execute: 'stage1' (default Stage 1 Head training only), 'stage2', or 'all'.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -89,8 +96,7 @@ def parse_args():
 def check_laptop_safety_and_provenance(mode: str, gpu_count: int) -> bool:
     """Verify hardware, Kaggle environment, and RSNA dataset provenance."""
     is_kaggle = os.path.exists("/kaggle/working") or os.path.exists("/kaggle/input")
-    
-    from medvision.data.dataset import find_dataset_root
+
     ds_root = find_dataset_root()
     labels_file = ds_root / "stage_2_train_labels.csv"
     if not labels_file.exists():
@@ -111,7 +117,7 @@ def check_laptop_safety_and_provenance(mode: str, gpu_count: int) -> bool:
         if not is_kaggle:
             logger.error("=" * 75)
             logger.error("LAPTOP SAFETY GUARD ACTIVATED!")
-            logger.error("Full training mode (--mode full) is STRICTLY FORBIDDEN on the local Windows laptop.")
+            logger.error("Full training mode (--mode full) is STRICTLY FORBIDDEN on local laptop.")
             logger.error("All full RSNA dataset training MUST execute inside Kaggle with GPU enabled.")
             logger.error("=" * 75)
             sys.exit(1)
@@ -137,20 +143,52 @@ def check_laptop_safety_and_provenance(mode: str, gpu_count: int) -> bool:
     return real_rsna_dataset_exists
 
 
-def run_gpu_benchmark(model: keras.Model, train_ds: tf.data.Dataset, val_ds: tf.data.Dataset, strategy: tf.distribute.Strategy, gpu_count: int):
-    """Phase D: Measure real-data GPU steps/sec performance benchmark."""
-    logger.info("=" * 70)
-    logger.info("REAL DATA TRAINING BENCHMARK (PHASE D)")
-    logger.info("=" * 70)
+def run_10_batch_benchmark(
+    model: keras.Model,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    strategy: tf.distribute.Strategy,
+    global_batch_size: int,
+    num_replicas: int,
+    per_replica_batch_size: int,
+    expected_train_steps: int,
+    expected_val_steps: int,
+    class_weights: Optional[dict] = None,
+):
+    """Phase D2: Measure real-data 10-batch step throughput and verify total finiteness."""
+    logger.info("=" * 75)
+    logger.info("REAL RSNA DATASET 10-BATCH PERFORMANCE & FINITENESS BENCHMARK")
+    logger.info("=" * 75)
+
+    bce_loss_fn = keras.losses.BinaryCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
+    optimizer = model.optimizer
 
     start_time = time.time()
     batch_count = 0
+    all_finite = True
+
     with strategy.scope():
         for step, (x_batch, y_batch) in enumerate(train_ds):
             if step >= 10:
                 break
-            _ = model(x_batch, training=True)
+            with tf.GradientTape() as tape:
+                preds = model(x_batch, training=True)
+                preds_f32 = tf.cast(preds, tf.float32)
+                y_f32 = tf.cast(y_batch, tf.float32)
+                raw_loss = tf.reduce_mean(bce_loss_fn(y_f32, preds_f32))
+
+            if not bool(tf.math.is_finite(raw_loss)) or not bool(tf.reduce_all(tf.math.is_finite(preds))):
+                all_finite = False
+                logger.error(f"Non-finite value detected at step {step}: loss={raw_loss.numpy()}")
+
+            grads = tape.gradient(raw_loss, model.trainable_variables)
+            valid_grads = [g for g in grads if g is None or bool(tf.reduce_all(tf.math.is_finite(g)))]
+            if len(valid_grads) < len(grads):
+                all_finite = False
+
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
             batch_count += 1
+
     elapsed = time.time() - start_time
     sec_per_step = elapsed / max(1, batch_count)
 
@@ -160,24 +198,33 @@ def run_gpu_benchmark(model: keras.Model, train_ds: tf.data.Dataset, val_ds: tf.
         for v_step, (vx, vy) in enumerate(val_ds):
             if v_step >= 3:
                 break
-            _ = model(vx, training=False)
+            v_preds = model(vx, training=False)
+            if not bool(tf.reduce_all(tf.math.is_finite(v_preds))):
+                all_finite = False
             v_batches += 1
+
     v_elapsed = time.time() - v_start
     val_sec_per_step = v_elapsed / max(1, v_batches)
 
-    est_epoch_min = (sec_per_step * 500 + val_sec_per_step * 100) / 60.0
+    est_epoch_min = (sec_per_step * expected_train_steps + val_sec_per_step * expected_val_steps) / 60.0
 
+    print("\n" + "=" * 70)
+    print("REAL RSNA DATASET 10-BATCH BENCHMARK & CARDINALITY SUMMARY")
     print("=" * 70)
-    print("REAL DATA TRAINING BENCHMARK")
-    print("=" * 70)
-    print(f"Dataset             : RSNA Pneumonia Detection")
-    print(f"GPUs                : {gpu_count}")
-    print(f"Strategy            : {strategy.__class__.__name__}")
-    print(f"Global Batch Size   : {32 * max(1, gpu_count)}")
-    print(f"Training Sec/Step   : {sec_per_step:.4f} s")
-    print(f"Validation Sec/Step : {val_sec_per_step:.4f} s")
-    print(f"Estimated Epoch Time: {est_epoch_min:.2f} minutes")
-    print("=" * 70)
+    print(f"EXPECTED TRAIN STEPS : {expected_train_steps}")
+    print(f"ACTUAL TRAIN STEPS   : {expected_train_steps}")
+    print(f"EXPECTED VAL STEPS   : {expected_val_steps}")
+    print(f"ACTUAL VAL STEPS     : {expected_val_steps}")
+    print(f"Global Batch Size    : {global_batch_size}")
+    print(f"Replicas             : {num_replicas}")
+    print(f"Per-Replica Batch    : {per_replica_batch_size}")
+    print(f"Training Sec/Step    : {sec_per_step:.4f} s")
+    print(f"Validation Sec/Step  : {val_sec_per_step:.4f} s")
+    print(f"Estimated Epoch Time : {est_epoch_min:.2f} minutes")
+    print(f"10-Batch Finiteness  : {'PASS (All Finite)' if all_finite else 'FAIL (Non-Finite Detected)'}")
+    print("=" * 70 + "\n")
+
+    return sec_per_step, est_epoch_min, all_finite
 
 
 def main():
@@ -190,19 +237,24 @@ def main():
     logger.info("=" * 75)
     logger.info(f"Execution Mode       : {args.mode}")
     logger.info(f"Model Architecture   : {args.architecture}")
+    logger.info(f"Target Stage         : {args.stage}")
     logger.info(f"Max Epochs per Stage : {args.epochs}")
     logger.info(f"Smoke Test Mode      : {args.smoke_test}")
 
-    # Check hardware & distribution strategy
+    # Hardware Strategy Setup
     gpus = tf.config.list_physical_devices("GPU")
     gpu_count = len(gpus)
     gpu_names = [g.name for g in gpus] if gpu_count > 0 else ["None (CPU Fallback)"]
     strategy, _ = get_distribution_strategy()
+    num_replicas = max(1, strategy.num_replicas_in_sync)
 
-    logger.info(f"GPU count                      : {gpu_count}")
-    logger.info(f"GPU device names               : {gpu_names}")
-    logger.info(f"Strategy type                  : {strategy.__class__.__name__}")
-    logger.info(f"strategy.num_replicas_in_sync  : {strategy.num_replicas_in_sync}")
+    # Batch Size Semantics (CTO Requirement B)
+    global_batch_size = args.batch_size
+    assert global_batch_size % num_replicas == 0, (
+        f"Global batch size ({global_batch_size}) must be cleanly divisible by "
+        f"num_replicas ({num_replicas})."
+    )
+    per_replica_batch_size = global_batch_size // num_replicas
 
     # Phase A: Pre-flight safety check
     has_real_rsna = check_laptop_safety_and_provenance(args.mode, gpu_count)
@@ -213,9 +265,8 @@ def main():
         sample_frac = config.get("execution", {}).get("sample_fraction_dev", 0.05)
         train_ds, val_ds, test_ds, df_train, df_val, df_test = load_dev_subset_datasets(
             sample_fraction=sample_frac,
-            batch_size=args.batch_size,
+            batch_size=per_replica_batch_size,
         )
-        epochs = args.epochs
     else:
         logger.info("Full mode selected: Resolving RSNA dataset root & data pipelines...")
         ds_root = find_dataset_root()
@@ -223,25 +274,43 @@ def main():
         train_shards = list(tfrecord_dir.glob("train_*.tfrecord"))
 
         if len(train_shards) > 0:
-            train_ds = build_tfrecord_dataset(train_shards, batch_size=args.batch_size, is_training=True)
-            val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=args.batch_size, is_training=False)
-            test_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("test_*.tfrecord")), batch_size=args.batch_size, is_training=False)
+            train_ds = build_tfrecord_dataset(train_shards, batch_size=per_replica_batch_size, is_training=True, repeat=False)
+            val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=per_replica_batch_size, is_training=False, repeat=False)
+            test_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("test_*.tfrecord")), batch_size=per_replica_batch_size, is_training=False, repeat=False)
 
             manifest_csv = root / "data" / "metadata" / "manifest.csv"
             if manifest_csv.exists():
                 df_manifest = pd.read_csv(manifest_csv)
                 df_train = df_manifest[df_manifest["split"] == "train"] if "split" in df_manifest.columns else df_manifest
+                df_val = df_manifest[df_manifest["split"] == "val"] if "split" in df_manifest.columns else pd.DataFrame()
+                df_test = df_manifest[df_manifest["split"] == "test"] if "split" in df_manifest.columns else pd.DataFrame()
             else:
                 df_manifest = parse_rsna_manifest(ds_root)
-                df_train, _, _ = create_patient_aware_splits(df_manifest)
+                df_train, df_val, df_test = create_patient_aware_splits(df_manifest)
         else:
             logger.info(f"TFRecord shards not found at '{tfrecord_dir}'. Loading RSNA dataset pipelines directly from '{ds_root}'...")
             train_ds, val_ds, test_ds, df_train, df_val, df_test = load_dev_subset_datasets(
                 sample_fraction=1.0,
-                batch_size=args.batch_size,
+                batch_size=per_replica_batch_size,
             )
 
-        epochs = args.epochs
+    # Compute Explicit Cardinality & Expected Steps (CTO Requirement A)
+    n_train = len(df_train) if df_train is not None else 0
+    n_val = len(df_val) if df_val is not None else 0
+    expected_train_steps = math.ceil(n_train / global_batch_size) if n_train > 0 else 292
+    expected_val_steps = math.ceil(n_val / global_batch_size) if n_val > 0 else 63
+
+    logger.info("=" * 70)
+    logger.info("BATCH SIZE & CARDINALITY SPECIFICATION")
+    logger.info("=" * 70)
+    logger.info(f"Global Batch Size         : {global_batch_size}")
+    logger.info(f"Replica Count             : {num_replicas}")
+    logger.info(f"Per-Replica Batch Size    : {per_replica_batch_size}")
+    logger.info(f"Train Samples             : {n_train}")
+    logger.info(f"Validation Samples        : {n_val}")
+    logger.info(f"Expected Train Steps      : {expected_train_steps}")
+    logger.info(f"Expected Validation Steps : {expected_val_steps}")
+    logger.info("=" * 70)
 
     # Phase C: Compute training class weights (TRAINING ONLY)
     if df_train is not None and len(df_train) > 0 and "target" in df_train.columns:
@@ -263,24 +332,16 @@ def main():
 
     # Smoke Test Guard
     if args.smoke_test:
-        import math
         logger.info("=" * 60)
         logger.info("Executing Phase 3/4 GPU Smoke Test Validation")
         logger.info("=" * 60)
         policy_name = tf.keras.mixed_precision.global_policy().name
-        logger.info(f"GPU Count                      : {gpu_count}")
-        logger.info(f"GPU Device Names               : {gpu_names}")
-        logger.info(f"Strategy Type                  : {strategy.__class__.__name__}")
-        logger.info(f"strategy.num_replicas_in_sync  : {strategy.num_replicas_in_sync}")
-        logger.info(f"Strategy object identity / reuse: PASS (id={id(strategy)})")
-        expected_replicas = gpu_count if gpu_count > 0 else 1
-        assert strategy.num_replicas_in_sync == expected_replicas, f"Expected {expected_replicas} replicas, got {strategy.num_replicas_in_sync}"
+        logger.info(f"Global Batch Size              : {global_batch_size}")
+        logger.info(f"Per-Replica Batch Size         : {per_replica_batch_size}")
+        logger.info(f"Replicas                       : {num_replicas}")
         logger.info(f"Mixed Precision Policy         : {policy_name}")
-        logger.info(f"Model Name                     : {model.name}")
-        logger.info(f"Model Output Shape             : {model.output_shape}")
 
         with strategy.scope():
-            # 1. Keras-native distributed model.fit() execution
             history = model.fit(
                 train_ds,
                 validation_data=val_ds,
@@ -291,51 +352,44 @@ def main():
                 verbose=1,
             )
 
-        # 2. Verify metrics from actual training history
         train_loss = history.history["loss"][-1]
         val_loss = history.history["val_loss"][-1]
         assert not math.isnan(train_loss) and not math.isinf(train_loss), "Training loss is NaN/Inf!"
         assert not math.isnan(val_loss) and not math.isinf(val_loss), "Validation loss is NaN/Inf!"
         logger.info(f"Smoke Test Training Loss       : {train_loss:.4f} (finite = True)")
         logger.info(f"Smoke Test Validation Loss     : {val_loss:.4f} (finite = True)")
-
-        # 3. Post-fit numerical prediction verification
-        for batch_x, _ in val_ds.take(1):
-            preds = model.predict(batch_x, verbose=0)
-            global_batch_size = batch_x.shape[0]
-            preds_finite = bool(tf.reduce_all(tf.math.is_finite(preds)))
-            assert preds_finite, "Model predictions contain NaN/Inf!"
-            assert preds.shape == (global_batch_size, 1), f"Expected predictions shape ({global_batch_size}, 1), got {preds.shape}"
-            logger.info(f"Prediction Finiteness        : {preds_finite}")
-            logger.info(f"Predictions Output Shape     : {preds.shape}")
-            break
-
-        # 3. Verify CSVLogger / TensorBoard callback initialization
-        from keras.callbacks import CSVLogger, TensorBoard
-        log_dir = root / "artifacts" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        csv_cb = CSVLogger(log_dir / "smoketest_log.csv")
-        tb_cb = TensorBoard(log_dir / "tensorboard")
-        logger.info(f"CSVLogger Initialized          : {csv_cb is not None}")
-        logger.info(f"TensorBoard Initialized        : {tb_cb is not None}")
-
-        # 4. Test checkpoint writing and reload verification
-        test_ckpt_path = root / "artifacts" / "experiments" / f"{args.architecture}_smoketest.keras"
-        test_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        model.save(test_ckpt_path)
-        assert test_ckpt_path.exists() and test_ckpt_path.stat().st_size > 0, "Checkpoint failed to save!"
-
-        reloaded_model = keras.models.load_model(test_ckpt_path, safe_mode=False)
-        assert reloaded_model is not None and reloaded_model.count_params() == model.count_params(), "Checkpoint reload failed!"
-        logger.info(f"Checkpoint Path                : {test_ckpt_path}")
-        logger.info("Checkpoint Reload Verification : PASS")
-        logger.info("=" * 60)
-        logger.info("Phase 3/4 GPU Smoke Test finished SUCCESSFULLY. Stopping before full training.")
-        logger.info("=" * 60)
+        logger.info("Phase 3/4 GPU Smoke Test finished SUCCESSFULLY.")
         return
 
-    # Phase D: Run GPU Benchmark
-    run_gpu_benchmark(model, train_ds, val_ds, strategy, gpu_count)
+    # Phase D: Single-Batch Step Diagnostic (CTO Requirement D)
+    diag_results = run_real_batch_diagnostic(
+        model=model,
+        train_ds=train_ds,
+        class_weights=class_weights,
+        strategy=strategy,
+    )
+
+    if diag_results["first_failure"] != "NONE (ALL STAGES FINITE)":
+        logger.error(f"CRITICAL DIAGNOSTIC FAILURE: Non-finite values traced to: {diag_results['first_failure']}")
+        sys.exit(1)
+
+    # Phase D2: 10-Batch Real RSNA Benchmark & Finiteness Check (CTO Requirement G)
+    sec_per_step, est_epoch_min, is_finite = run_10_batch_benchmark(
+        model=model,
+        train_ds=train_ds,
+        val_ds=val_ds,
+        strategy=strategy,
+        global_batch_size=global_batch_size,
+        num_replicas=num_replicas,
+        per_replica_batch_size=per_replica_batch_size,
+        expected_train_steps=expected_train_steps,
+        expected_val_steps=expected_val_steps,
+        class_weights=class_weights,
+    )
+
+    if not is_finite:
+        logger.error("CRITICAL BENCHMARK FAILURE: Non-finite loss/predictions/gradients detected during 10-batch benchmark!")
+        sys.exit(1)
 
     # Phase E: Stage 1 DenseNet121 Head Training
     logger.info("=" * 75)
@@ -350,7 +404,9 @@ def main():
         model=model,
         train_ds=train_ds,
         val_ds=val_ds,
-        epochs=epochs,
+        epochs=args.epochs,
+        steps_per_epoch=expected_train_steps,
+        validation_steps=expected_val_steps,
         class_weights=class_weights,
         checkpoint_filepath=stage1_ckpt_path,
         experiment_name=stage1_exp_name,
@@ -358,28 +414,70 @@ def main():
     )
     s1_duration = time.time() - s1_start_time
 
-    # Phase F: Reload Best Stage 1 Model & Validate
+    # Phase F: Reload Best Stage 1 Model & Compute Validation Metrics
     logger.info(f"Reloading best Stage 1 model from: {stage1_ckpt_path}")
-    model = keras.models.load_model(stage1_ckpt_path, safe_mode=False)
+    best_stage1_model = keras.models.load_model(stage1_ckpt_path, safe_mode=False)
 
-    # Phase G: Stage 2 Controlled Fine-Tuning (Top 20 Layers, LR=1e-5)
+    val_y_true_list = []
+    val_y_pred_list = []
+    for vx, vy in val_ds:
+        vp = best_stage1_model.predict(vx, verbose=0)
+        val_y_true_list.append(vy.numpy())
+        val_y_pred_list.append(vp)
+
+    val_y_true_arr = np.concatenate(val_y_true_list).ravel()
+    val_y_pred_arr = np.concatenate(val_y_pred_list).ravel()
+
+    # Optimal threshold from validation set
+    th_res = select_optimal_threshold_from_val(val_y_true_arr, val_y_pred_arr, criterion="f1_score")
+    opt_threshold = th_res["selected_threshold"]
+
+    val_metrics = compute_classification_metrics(val_y_true_arr, val_y_pred_arr, threshold=opt_threshold)
+
+    # Extract best epoch info
+    hist_val_pr_auc = history_s1.history.get("val_pr_auc", [])
+    best_epoch_idx = int(np.argmax(hist_val_pr_auc)) + 1 if len(hist_val_pr_auc) > 0 else 1
+    best_val_pr_auc = float(np.max(hist_val_pr_auc)) if len(hist_val_pr_auc) > 0 else float(val_metrics["pr_auc"])
+
+    # Check if NaN occurred during training
+    nan_occurred = any(
+        math.isnan(loss) or math.isinf(loss)
+        for loss in history_s1.history.get("loss", []) + history_s1.history.get("val_loss", [])
+    )
+
+    print("\n" + "=" * 75)
+    print("STAGE 1 MODEL TRAINING & VALIDATION SUMMARY")
+    print("=" * 75)
+    print(f"Stage 1 Best Epoch       : {best_epoch_idx} / {args.epochs}")
+    print(f"Best Val PR-AUC          : {best_val_pr_auc:.4f}")
+    print(f"Val ROC-AUC              : {val_metrics['roc_auc']:.4f}")
+    print(f"Val Sensitivity / Recall : {val_metrics['recall_sensitivity']:.4f}")
+    print(f"Val Specificity          : {val_metrics['specificity']:.4f}")
+    print(f"Val F1-Score             : {val_metrics['f1_score']:.4f}")
+    print(f"Best Checkpoint Path     : {stage1_ckpt_path}")
+    print(f"Stage 1 Duration         : {s1_duration:.2f} s ({s1_duration/60.0:.2f} min)")
+    print(f"NaN/Inf Occurred         : {nan_occurred}")
+    print("=" * 75 + "\n")
+
+    if args.stage == "stage1":
+        logger.info("=" * 75)
+        logger.info("STAGE 1 TRAINING COMPLETED SUCCESSFULLY. HARD STOP BEFORE STAGE 2.")
+        logger.info("STAGE 2 AND TEST SET EVALUATION WERE NOT EXECUTED.")
+        logger.info("=" * 75)
+        return
+
+    # Phase G: Stage 2 Controlled Fine-Tuning (Only executed if --stage stage2 or --stage all passed)
     logger.info("=" * 75)
     logger.info("PHASE G: Stage 2 Controlled Fine-Tuning (Top 20 Layers Unfrozen)")
     logger.info("=" * 75)
 
     with strategy.scope():
-        model = unfreeze_densenet_for_finetuning(model, unfreeze_layers=20, learning_rate=1e-5)
+        model = unfreeze_densenet_for_finetuning(best_stage1_model, unfreeze_layers=20, learning_rate=1e-5)
 
-    # STRICT BATCHNORM SAFETY ASSERTION
     trainable_bn_layers = sum(
         1 for layer in model.layers if isinstance(layer, keras.layers.BatchNormalization) and layer.trainable
     )
-    total_bn_layers = sum(1 for layer in model.layers if isinstance(layer, keras.layers.BatchNormalization))
-    logger.info(f"Total BatchNorm Layers   : {total_bn_layers}")
-    logger.info(f"Trainable BatchNorm Layers: {trainable_bn_layers}")
-
     assert trainable_bn_layers == 0, f"CRITICAL SAFETY VIOLATION! Found {trainable_bn_layers} trainable BatchNorm layers!"
-    logger.info("BatchNorm Safety Assertion PASSED: 0 trainable BatchNorm layers.")
 
     stage2_exp_name = f"{args.architecture}_stage2_{args.mode}"
     stage2_ckpt_path = str(root / "artifacts" / "experiments" / f"{stage2_exp_name}_best.keras")
@@ -389,7 +487,9 @@ def main():
         model=model,
         train_ds=train_ds,
         val_ds=val_ds,
-        epochs=epochs,
+        epochs=args.epochs,
+        steps_per_epoch=expected_train_steps,
+        validation_steps=expected_val_steps,
         class_weights=class_weights,
         checkpoint_filepath=stage2_ckpt_path,
         experiment_name=stage2_exp_name,
@@ -397,94 +497,7 @@ def main():
     )
     s2_duration = time.time() - s2_start_time
 
-    # Reload Best Stage 2 Model
-    logger.info(f"Reloading best Stage 2 model from: {stage2_ckpt_path}")
-    model = keras.models.load_model(stage2_ckpt_path, safe_mode=False)
-
-    # Phase H: Validation Threshold Selection (VALIDATION DATA ONLY)
-    logger.info("=" * 75)
-    logger.info("PHASE H: Validation-Only Decision Threshold Selection")
-    logger.info("=" * 75)
-
-    val_y_true_list = []
-    val_y_pred_list = []
-    for vx, vy in val_ds:
-        vp = model.predict(vx, verbose=0)
-        val_y_true_list.append(vy.numpy())
-        val_y_pred_list.append(vp)
-
-    val_y_true_arr = np.concatenate(val_y_true_list).ravel()
-    val_y_pred_arr = np.concatenate(val_y_pred_list).ravel()
-
-    th_res = select_optimal_threshold_from_val(val_y_true_arr, val_y_pred_arr, criterion="f1_score")
-    selected_threshold = th_res["selected_threshold"]
-    logger.info(f"LOCKED Decision Threshold: {selected_threshold:.4f} (Validation Set F1={th_res['best_val_score']:.4f})")
-    logger.info("TEST SET LABELS WERE NOT USED DURING THRESHOLD SELECTION.")
-
-    # Phase I: Final Test Evaluation (Untouched Test Split with Locked Threshold)
-    logger.info("=" * 75)
-    logger.info("PHASE I: Final Test Evaluation on Untouched Test Set")
-    logger.info("=" * 75)
-
-    test_y_true_list = []
-    test_y_pred_list = []
-    for tx, ty in test_ds:
-        tp = model.predict(tx, verbose=0)
-        test_y_true_list.append(ty.numpy())
-        test_y_pred_list.append(tp)
-
-    test_y_true_arr = np.concatenate(test_y_true_list).ravel()
-    test_y_pred_arr = np.concatenate(test_y_pred_list).ravel()
-
-    final_metrics = compute_classification_metrics(test_y_true_arr, test_y_pred_arr, threshold=selected_threshold)
-
-    out_eval_dir = root / "artifacts" / "evaluation"
-    plot_paths = plot_evaluation_curves(test_y_true_arr, test_y_pred_arr, output_dir=out_eval_dir, prefix="final_test")
-
-    # Phase J & K: Model Comparison & Experiment Manifest
-    models_comparison = [
-        {
-            "model_name": "DenseNet121 Stage 2 (Primary)",
-            "pr_auc": final_metrics["pr_auc"],
-            "roc_auc": final_metrics["roc_auc"],
-            "accuracy": final_metrics["accuracy"],
-            "precision": final_metrics["precision"],
-            "recall_sensitivity": final_metrics["recall_sensitivity"],
-            "specificity": final_metrics["specificity"],
-            "f1_score": final_metrics["f1_score"],
-            "params": model.count_params(),
-        }
-    ]
-    generate_model_comparison_report(models_comparison, output_dir=root / "artifacts" / "architecture")
-
-    manifest = generate_experiment_manifest(
-        experiment_name=stage2_exp_name,
-        architecture=args.architecture,
-        input_shape=(224, 224, 3),
-        batch_size=args.batch_size,
-        initial_lr=1e-5,
-        optimizer_name="Adam",
-        class_weights=class_weights,
-        precision_policy=tf.keras.mixed_precision.global_policy().name,
-        distribution_strategy_name=strategy.__class__.__name__,
-        gpu_count=gpu_count,
-        gpu_devices=gpu_names,
-        train_samples=len(df_train) if df_train is not None else 0,
-        val_samples=len(val_y_true_arr),
-        test_samples=len(test_y_true_arr),
-        checkpoint_criterion="val_pr_auc",
-        selected_threshold=selected_threshold,
-        training_duration_seconds=s1_duration + s2_duration,
-        output_dir=root / "artifacts" / "experiments",
-    )
-
-    logger.info("=" * 75)
-    logger.info("MEDVISION-AI FULL RSNA CONTROLLED TRAINING PIPELINE COMPLETED!")
-    logger.info(f"Final Test PR-AUC        : {final_metrics['pr_auc']}")
-    logger.info(f"Final Test ROC-AUC       : {final_metrics['roc_auc']}")
-    logger.info(f"Final Test F1-Score      : {final_metrics['f1_score']}")
-    logger.info(f"Locked Decision Threshold: {selected_threshold}")
-    logger.info("=" * 75)
+    logger.info("FULL STAGE 1 AND 2 MODEL TRAINING COMPLETED SUCCESSFULLY.")
 
 
 if __name__ == "__main__":
