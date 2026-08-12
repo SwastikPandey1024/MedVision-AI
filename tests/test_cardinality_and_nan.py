@@ -166,6 +166,16 @@ def test_train_script_stage_choices_include_exp_a_and_exp_b():
     assert args_b.stage == "exp_b"
 
 
+def test_train_script_help_string_does_not_raise_error():
+    """Verify parse_args --help formatting does not raise TypeError."""
+    from scripts.train import parse_args
+    import sys
+
+    sys.argv = ["train.py", "--help"]
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_check_laptop_safety_and_provenance_guard(monkeypatch):
     """Verify full training mode fails safely when missing real RSNA dataset or GPU."""
     # Test laptop CPU guard: mode='full' on non-Kaggle with 0 GPUs

@@ -54,7 +54,7 @@ def parse_args():
         type=str,
         default="dev",
         choices=["dev", "full"],
-        help="Execution mode: 'dev' for 5% local subset, 'full' for complete Kaggle RSNA dataset.",
+        help="Execution mode: 'dev' for 5 percent local subset, 'full' for complete Kaggle RSNA dataset.",
     )
     parser.add_argument(
         "--architecture",
