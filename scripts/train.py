@@ -33,6 +33,8 @@ from medvision.models.trainer import (
     train_model,
     compute_training_class_weights,
     run_real_batch_diagnostic,
+    inspect_10_batch_losses,
+    run_10_batch_benchmark,
 )
 from medvision.evaluation import (
     compute_classification_metrics,
@@ -160,6 +162,15 @@ def run_10_batch_benchmark(
     logger.info("=" * 75)
     logger.info("REAL RSNA DATASET 10-BATCH PERFORMANCE & FINITENESS BENCHMARK")
     logger.info("=" * 75)
+
+    # Step-by-step 10-batch and 3-val batch compiled loss diagnostic audit
+    audit_results = inspect_10_batch_losses(
+        model=model,
+        train_ds=train_ds,
+        val_ds=val_ds,
+        class_weights=class_weights,
+        strategy=strategy,
+    )
 
     start_time = time.time()
     with strategy.scope():

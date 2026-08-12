@@ -467,6 +467,153 @@ def run_real_batch_diagnostic(
     return diag
 
 
+def inspect_10_batch_losses(
+    model: keras.Model,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    class_weights: Optional[Dict[int, float]] = None,
+    strategy: Optional[tf.distribute.Strategy] = None,
+) -> Dict[str, Any]:
+    """Inspect every batch in the 10-batch train and 3-batch val sets to trace non-finite loss origins.
+
+    Traces:
+    - compiled Keras loss vs. direct float32 BinaryCrossentropy vs. weighted float32 BCE
+    - predictions min/max, dtypes, unique targets
+    - sample_weight / class_weight application
+    """
+    logger.info("=" * 75)
+    logger.info("10-BATCH STEP-BY-STEP LOSS DIAGNOSTIC AUDIT")
+    logger.info("=" * 75)
+
+    if strategy is None:
+        strategy = tf.distribute.get_strategy()
+
+    c0 = float(class_weights.get(0, 1.0)) if class_weights else 1.0
+    c1 = float(class_weights.get(1, 1.0)) if class_weights else 1.0
+
+    bce_fn = keras.losses.BinaryCrossentropy(from_logits=False)
+    bce_none_fn = keras.losses.BinaryCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.NONE)
+
+    first_bad_train_batch = None
+    first_bad_val_batch = None
+
+    # Inspect 10 Training Batches
+    train_iter = iter(train_ds)
+    for b_idx in range(1, 11):
+        try:
+            x_b, y_b = next(train_iter)
+        except StopIteration:
+            break
+
+        y_pred = model(x_b, training=True)
+        y_f32 = tf.cast(y_b, tf.float32)
+        y_pred_f32 = tf.cast(y_pred, tf.float32)
+
+        pred_min = float(tf.reduce_min(y_pred_f32))
+        pred_max = float(tf.reduce_max(y_pred_f32))
+        pred_finite = bool(tf.reduce_all(tf.math.is_finite(y_pred_f32)))
+
+        raw_bce = float(bce_fn(y_f32, y_pred_f32))
+        sample_w = tf.where(tf.equal(y_f32, 1.0), c1, c0)
+        weighted_bce_vec = bce_none_fn(y_f32, y_pred_f32) * sample_w
+        weighted_bce = float(tf.reduce_mean(weighted_bce_vec))
+
+        # Compiled Keras loss evaluation
+        try:
+            if hasattr(model, "compute_loss"):
+                compiled_loss_tensor = model.compute_loss(x=x_b, y=y_f32, y_pred=y_pred_f32, sample_weight=sample_w)
+            elif hasattr(model, "compiled_loss") and model.compiled_loss is not None:
+                compiled_loss_tensor = model.compiled_loss(y_f32, y_pred_f32, sample_weight=sample_w)
+            else:
+                compiled_loss_tensor = model.loss(y_f32, y_pred_f32)
+            compiled_loss_val = float(compiled_loss_tensor)
+        except Exception as e:
+            compiled_loss_val = float("nan")
+
+        loss_finite = math.isfinite(compiled_loss_val)
+
+        logger.info(
+            f"TRAIN BATCH {b_idx:02d}/10: y_unique={np.unique(y_b.numpy().ravel()).tolist()} | "
+            f"pred=[{pred_min:.4f}, {pred_max:.4f}] (finite={pred_finite}) | "
+            f"raw_bce={raw_bce:.4f} | weighted_bce={weighted_bce:.4f} | compiled_loss={compiled_loss_val:.4f} | "
+            f"finite={loss_finite}"
+        )
+
+        if not loss_finite or not pred_finite or not math.isfinite(raw_bce):
+            if first_bad_train_batch is None:
+                first_bad_train_batch = {
+                    "batch_index": b_idx,
+                    "y_unique": np.unique(y_b.numpy().ravel()).tolist(),
+                    "pred_dtype": str(y_pred.dtype),
+                    "pred_min": pred_min,
+                    "pred_max": pred_max,
+                    "pred_finite": pred_finite,
+                    "compiled_loss": compiled_loss_val,
+                    "raw_bce": raw_bce,
+                    "weighted_bce": weighted_bce,
+                    "class_weights": {0: c0, 1: c1},
+                    "class_weight_active": class_weights is not None,
+                }
+
+    # Inspect 3 Validation Batches
+    val_iter = iter(val_ds)
+    for v_idx in range(1, 4):
+        try:
+            xv, yv = next(val_iter)
+        except StopIteration:
+            break
+
+        y_pred_v = model(xv, training=False)
+        yv_f32 = tf.cast(yv, tf.float32)
+        y_pred_v_f32 = tf.cast(y_pred_v, tf.float32)
+
+        pred_min_v = float(tf.reduce_min(y_pred_v_f32))
+        pred_max_v = float(tf.reduce_max(y_pred_v_f32))
+        pred_finite_v = bool(tf.reduce_all(tf.math.is_finite(y_pred_v_f32)))
+
+        raw_bce_v = float(bce_fn(yv_f32, y_pred_v_f32))
+
+        try:
+            if hasattr(model, "compute_loss"):
+                compiled_loss_v_tensor = model.compute_loss(x=xv, y=yv_f32, y_pred=y_pred_v_f32, sample_weight=None)
+            elif hasattr(model, "compiled_loss") and model.compiled_loss is not None:
+                compiled_loss_v_tensor = model.compiled_loss(yv_f32, y_pred_v_f32, sample_weight=None)
+            else:
+                compiled_loss_v_tensor = model.loss(yv_f32, y_pred_v_f32)
+            compiled_loss_v_val = float(compiled_loss_v_tensor)
+        except Exception as e:
+            compiled_loss_v_val = float("nan")
+
+        loss_finite_v = math.isfinite(compiled_loss_v_val)
+
+        logger.info(
+            f"VAL BATCH   {v_idx:02d}/03: y_unique={np.unique(yv.numpy().ravel()).tolist()} | "
+            f"pred=[{pred_min_v:.4f}, {pred_max_v:.4f}] (finite={pred_finite_v}) | "
+            f"raw_bce={raw_bce_v:.4f} | compiled_loss={compiled_loss_v_val:.4f} | "
+            f"finite={loss_finite_v}"
+        )
+
+        if not loss_finite_v or not pred_finite_v or not math.isfinite(raw_bce_v):
+            if first_bad_val_batch is None:
+                first_bad_val_batch = {
+                    "batch_index": v_idx,
+                    "y_unique": np.unique(yv.numpy().ravel()).tolist(),
+                    "pred_dtype": str(y_pred_v.dtype),
+                    "pred_min": pred_min_v,
+                    "pred_max": pred_max_v,
+                    "pred_finite": pred_finite_v,
+                    "compiled_loss": compiled_loss_v_val,
+                    "raw_bce": raw_bce_v,
+                    "class_weight_active": False,
+                }
+
+    logger.info("=" * 75)
+    return {
+        "first_bad_train_batch": first_bad_train_batch,
+        "first_bad_val_batch": first_bad_val_batch,
+    }
+
+
 def train_model(
     model: keras.Model,
     train_ds: tf.data.Dataset,
