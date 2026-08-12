@@ -152,7 +152,7 @@ def build_model(
 
         if compile_model:
             lr_val = float(learning_rate) if isinstance(learning_rate, (int, float, str)) else learning_rate
-            optimizer = keras.optimizers.Adam(learning_rate=lr_val)
+            optimizer = keras.optimizers.Adam(learning_rate=lr_val, clipnorm=1.0)
             loss_fn = keras.losses.BinaryCrossentropy()
             metrics = get_model_metrics()
 
@@ -161,6 +161,6 @@ def build_model(
                 loss=loss_fn,
                 metrics=metrics,
             )
-            logger.info(f"Successfully compiled '{architecture}' model (LR={learning_rate}).")
+            logger.info(f"Successfully compiled '{architecture}' model (LR={learning_rate}, clipnorm=1.0).")
 
     return model

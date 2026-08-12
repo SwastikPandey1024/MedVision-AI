@@ -125,11 +125,16 @@ def load_dev_subset_datasets(
 
             if path and path.endswith(".dcm") and (root / path).exists():
                 img, _ = read_and_process_dicom(str(root / path), target_size=target_size)
+                img = img.astype(np.float32) / 255.0
             else:
-                # Deterministic synthetic image pattern for local CPU smoke testing
-                img = np.random.randint(50, 200, size=(*target_size, 3), dtype=np.uint8)
+                # Smooth synthetic chest X-ray pattern for dev smoke testing (prevents float16 gradient explosion)
+                x_grid = np.linspace(-1.0, 1.0, target_size[0], dtype=np.float32)
+                y_grid = np.linspace(-1.0, 1.0, target_size[1], dtype=np.float32)
+                xx, yy = np.meshgrid(x_grid, y_grid)
+                blob = np.exp(-(xx**2 + yy**2) * (1.2 + 0.3 * target))
+                img = np.stack([blob, blob, blob], axis=-1).astype(np.float32)
 
-            images_list.append(img.astype(np.float32) / 255.0)
+            images_list.append(img)
             labels_list.append(target)
 
         img_tensor = tf.constant(np.array(images_list, dtype=np.float32))
