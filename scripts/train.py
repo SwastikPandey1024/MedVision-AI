@@ -43,6 +43,7 @@ from medvision.models.trainer import (
     inspect_10_batch_losses,
     build_callbacks,
     run_forensic_k_experiments,
+    run_stage2_precision_forensic_experiments,
     verify_checkpoint_persistence,
     find_valid_resume_checkpoint,
     resolve_stage2_source_checkpoint,
@@ -59,7 +60,7 @@ from medvision.utils.logger import get_logger
 logger = get_logger("medvision.train_script")
 
 
-def parse_args():
+def parse_args(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="MedVision-AI Controlled Cloud Model Training Engine")
     parser.add_argument(
         "--mode",
@@ -107,9 +108,10 @@ def parse_args():
             "stage1",
             "stage2",
             "stage2_fit",
+            "stage2_forensic",
             "all",
         ],
-        help="Training stage: 'diagnostic', 'preflight_only', 'clean_fit_only', 'forensic', 'exp_k1', 'exp_k2', 'exp_k3', 'stage1', 'stage2', etc.",
+        help="Training stage: 'diagnostic', 'preflight_only', 'clean_fit_only', 'forensic', 'exp_k1', 'exp_k2', 'exp_k3', 'stage1', 'stage2', 'stage2_forensic', etc.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -138,7 +140,7 @@ def parse_args():
         action="store_true",
         help="Resume from the canonical valid Stage 1 checkpoint when one exists.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def check_laptop_safety_and_provenance(mode: str, gpu_count: int) -> bool:
@@ -489,6 +491,46 @@ def main():
             config=config,
             strategy=strategy,
         )
+
+    if args.stage == "stage2_forensic":
+        logger.info("=" * 75)
+        logger.info("STAGE 2 FORENSIC: FP32 VS mixed_float16 NUMERICAL COMPARISON")
+        logger.info("  Maximum: 10 train batches | 3 validation batches | no full Stage 2 training")
+        logger.info("=" * 75)
+
+        if args.mode != "full":
+            raise ValueError("STAGE 2 FORENSIC requires --mode full with the Kaggle RSNA runtime.")
+
+        stage1_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage1_best.keras")
+        stage2_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage2_best.keras")
+        source = resolve_stage2_source_checkpoint(stage1_ckpt_path, stage2_ckpt_path, args.architecture)
+        source_model = source.model
+
+        results = run_stage2_precision_forensic_experiments(
+            architecture=args.architecture,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            class_weights=class_weights,
+            strategy=strategy,
+            config=config,
+            source_model=source_model,
+            max_train_batches=10,
+            max_val_batches=3,
+            learning_rate=1e-5,
+        )
+
+        for label, result in results.items():
+            logger.info(
+                "%s | status=%s | policy=%s | first_bad_batch=%s | first_bad_tensor=%s | trainable_layers=%s | trainable_bn=%s",
+                label,
+                result["status"],
+                result["policy_name"],
+                result["first_bad_batch"]["batch"] if result["first_bad_batch"] else None,
+                result["first_bad_tensor"],
+                result["trainable_layer_count"],
+                result["trainable_batchnorm_count"],
+            )
+        return
 
     # Smoke Test Guard
     if args.smoke_test:

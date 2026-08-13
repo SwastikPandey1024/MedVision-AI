@@ -464,6 +464,23 @@ class BatchLossTrackerCallback(keras.callbacks.Callback):
         self.first_bad_batch: Optional[Dict[str, Any]] = None
         self.first_bad_tensor: Optional[str] = None
 
+    def _trainable_layer_summary(self) -> Tuple[int, int]:
+        """Return total trainable layers and trainable BatchNorm layer count."""
+        trainable_layers = 0
+        trainable_bn = 0
+        for layer in self.model.layers:
+            if hasattr(layer, "trainable") and layer.trainable:
+                trainable_layers += 1
+                if isinstance(layer, keras.layers.BatchNormalization):
+                    trainable_bn += 1
+            if isinstance(layer, keras.Model):
+                for nested in layer.layers:
+                    if hasattr(nested, "trainable") and nested.trainable:
+                        trainable_layers += 1
+                        if isinstance(nested, keras.layers.BatchNormalization):
+                            trainable_bn += 1
+        return trainable_layers, trainable_bn
+
     def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None):
         logs = logs or {}
         b_idx = batch + 1
@@ -555,20 +572,27 @@ class BatchLossTrackerCallback(keras.callbacks.Callback):
             and len(non_finite_log_keys) == 0
         )
 
+        trainable_layer_count, trainable_bn_count = self._trainable_layer_summary()
+        policy_name = tf.keras.mixed_precision.global_policy().name
         record = {
             "batch": b_idx,
             "loss": float(loss_val) if loss_val is not None else None,
             "loss_finite": loss_finite,
+            "predictions_finite": True,
             "weights_finite": weights_finite,
             "weights_range": [w_min_val, w_max_val],
             "bad_weight": bad_weight_name,
-            "opt_vars_finite": opt_vars_finite,
+            "gradients_finite": True,
+            "optimizer_variables_finite": opt_vars_finite,
             "opt_vars_range": [opt_min_val, opt_max_val],
             "bad_opt_var": bad_opt_var_name,
             "loss_scale": loss_scale_val,
             "metrics_finite": metrics_finite,
             "bad_metric": bad_metric_name,
             "non_finite_log_keys": non_finite_log_keys,
+            "dtype_policy": policy_name,
+            "trainable_layer_count": trainable_layer_count,
+            "trainable_batchnorm_count": trainable_bn_count,
             "logs": {
                 k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
                 for k, v in logs.items()
@@ -1474,6 +1498,122 @@ def run_forensic_k_experiments(
                 f"train_loss={t_str} | val_loss={v_str}"
             )
     logger.info("#" * 75)
+
+    return results
+
+
+def run_stage2_precision_forensic_experiments(
+    architecture: str,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    class_weights: Optional[Dict[int, float]] = None,
+    strategy: Optional[tf.distribute.Strategy] = None,
+    config: Optional[Dict[str, Any]] = None,
+    source_model: Optional[keras.Model] = None,
+    max_train_batches: int = 10,
+    max_val_batches: int = 3,
+    learning_rate: float = 1e-5,
+) -> Dict[str, Dict[str, Any]]:
+    """Run the controlled Stage 2 numerical comparison for FP32 vs mixed_float16.
+
+    Both experiments share the same validated Stage 1 checkpoint, dataset, stage-2 unfreezing,
+    BatchNorm freeze, optimizer semantics, and clipnorm = 1.0. Only the precision policy differs.
+    """
+    from medvision.models.densenet import unfreeze_densenet_for_finetuning
+    from medvision.utils.metrics import get_model_metrics
+
+    if source_model is None:
+        from medvision.models.factory import build_model
+        if strategy is not None:
+            with strategy.scope():
+                source_model = build_model(
+                    architecture=architecture,
+                    input_shape=(224, 224, 3),
+                    learning_rate=1e-4,
+                    compile_model=False,
+                    mixed_precision=False,
+                    config=config,
+                    strategy=strategy,
+                )
+        else:
+            source_model = build_model(
+                architecture=architecture,
+                input_shape=(224, 224, 3),
+                learning_rate=1e-4,
+                compile_model=False,
+                mixed_precision=False,
+                config=config,
+                strategy=strategy,
+            )
+
+    results: Dict[str, Dict[str, Any]] = {}
+    for label, enable_mixed_precision in (("EXP_S2_FP32", False), ("EXP_S2_MP", True)):
+        logger.info("=" * 80)
+        logger.info(f"FORENSIC {label}: precision={'mixed_float16' if enable_mixed_precision else 'float32'}")
+        logger.info("=" * 80)
+
+        keras.mixed_precision.set_global_policy("mixed_float16" if enable_mixed_precision else "float32")
+        policy_name = tf.keras.mixed_precision.global_policy().name
+
+        staged_model = keras.models.clone_model(source_model)
+        staged_model.set_weights(source_model.get_weights())
+        staged_model = unfreeze_densenet_for_finetuning(staged_model, unfreeze_layers=20, learning_rate=learning_rate)
+
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
+        staged_model.compile(
+            optimizer=optimizer,
+            loss=keras.losses.BinaryCrossentropy(),
+            metrics=get_model_metrics(),
+        )
+
+        trainable_layers = sum(1 for layer in staged_model.layers if getattr(layer, "trainable", False))
+        trainable_bn = sum(
+            1
+            for layer in staged_model.layers
+            if getattr(layer, "trainable", False) and isinstance(layer, keras.layers.BatchNormalization)
+        )
+
+        tracker = BatchLossTrackerCallback(steps_per_epoch=max_train_batches, verbose=True)
+        try:
+            history = staged_model.fit(
+                train_ds.take(max_train_batches),
+                validation_data=val_ds.take(max_val_batches),
+                epochs=1,
+                steps_per_epoch=max_train_batches,
+                validation_steps=max_val_batches,
+                class_weight=class_weights,
+                callbacks=[tracker],
+                verbose=1,
+            )
+            last_loss = history.history.get("loss", [None])[-1]
+            last_val_loss = history.history.get("val_loss", [None])[-1]
+            finite = math.isfinite(float(last_loss)) and math.isfinite(float(last_val_loss))
+            status = "PASS" if finite else "FAIL"
+        except Exception as exc:
+            logger.exception("FORENSIC %s exception during Stage 2 precision probe: %s", label, exc)
+            status = "ERROR"
+            last_loss = None
+            last_val_loss = None
+
+        first_bad_batch = tracker.first_bad_batch
+        first_bad_tensor = tracker.first_bad_tensor
+        results[label] = {
+            "status": status,
+            "policy_name": policy_name,
+            "last_train_loss": last_loss,
+            "last_val_loss": last_val_loss,
+            "first_bad_batch": first_bad_batch,
+            "first_bad_tensor": first_bad_tensor,
+            "trainable_layer_count": trainable_layers,
+            "trainable_batchnorm_count": trainable_bn,
+            "records": tracker.history_records,
+            "dtype": str(staged_model.dtype_policy)
+            if hasattr(staged_model, "dtype_policy")
+            else str(tf.keras.mixed_precision.global_policy().name),
+        }
+
+        logger.info("%s summary | status=%s | policy=%s | first_bad_batch=%s | first_bad_tensor=%s",
+                    label, status, policy_name, first_bad_batch["batch"] if first_bad_batch else None, first_bad_tensor)
 
     return results
 

@@ -263,3 +263,47 @@ def test_stage2_unfreeze_top_20_layers_and_freezes_batchnorm(tmp_path):
     if hasattr(model, "optimizer") and model.optimizer is not None:
         assert float(model.optimizer.learning_rate) == pytest.approx(1e-5)
         assert float(model.optimizer.clipnorm) == pytest.approx(1.0)
+
+
+def test_stage2_forensic_mode_is_registered():
+    """The dedicated Stage 2 forensic mode must be accepted by the CLI."""
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "train.py"
+    spec = importlib.util.spec_from_file_location("medvision_train_forensic_cli", script_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+
+    args = module.parse_args(["--stage", "stage2_forensic", "--architecture", "densenet121"])
+    assert args.stage == "stage2_forensic"
+    assert args.architecture == "densenet121"
+
+
+def test_stage2_forensic_precision_comparison_runs_on_synthetic_data(tmp_path):
+    """Stage 2 forensic mode must compare FP32 and mixed_float16 with the same Stage 2 setup."""
+    source_model = build_and_save_dummy_model(str(tmp_path / "stage1_forensic.keras"))
+    ds = create_dummy_dataset()
+
+    from medvision.models.trainer import run_stage2_precision_forensic_experiments
+
+    results = run_stage2_precision_forensic_experiments(
+        architecture="custom_cnn",
+        train_ds=ds,
+        val_ds=ds,
+        class_weights={0: 1.0, 1: 1.0},
+        strategy=tf.distribute.get_strategy(),
+        config={},
+        source_model=source_model,
+        max_train_batches=2,
+        max_val_batches=1,
+    )
+
+    assert set(results.keys()) == {"EXP_S2_FP32", "EXP_S2_MP"}
+    for label, result in results.items():
+        assert "status" in result
+        assert "first_bad_batch" in result
+        assert "first_bad_tensor" in result
+        assert "policy_name" in result
+        assert "trainable_layer_count" in result
+        assert "trainable_batchnorm_count" in result
+        assert "records" in result
+        assert label in {"EXP_S2_FP32", "EXP_S2_MP"}
