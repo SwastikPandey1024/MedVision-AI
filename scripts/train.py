@@ -45,6 +45,7 @@ from medvision.models.trainer import (
     run_forensic_k_experiments,
     verify_checkpoint_persistence,
     find_valid_resume_checkpoint,
+    resolve_stage2_source_checkpoint,
 )
 from medvision.evaluation import (
     compute_classification_metrics,

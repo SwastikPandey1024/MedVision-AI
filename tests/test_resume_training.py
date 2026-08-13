@@ -1,6 +1,9 @@
 """Unit tests proving safe resume training mechanics in MedVision-AI."""
 
+import importlib.util
 import os
+from pathlib import Path
+
 import pytest
 import numpy as np
 import tensorflow as tf
@@ -224,6 +227,25 @@ def test_stage2_checkpoint_path_uses_canonical_runtime_location(tmp_path, monkey
     assert stage2_path.parent.name == "checkpoints"
     assert stage2_path.name == "densenet121_stage2_best.keras"
     assert str(stage2_path).endswith("medvision_outputs/checkpoints/densenet121_stage2_best.keras")
+
+
+def test_stage2_script_imports_canonical_resolver_and_falls_back_cleanly(tmp_path):
+    """The Stage 2 orchestration path must reference the canonical resolver and not hit a NameError."""
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "train.py"
+    spec = importlib.util.spec_from_file_location("medvision_train_script", script_path)
+    train_module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(train_module)
+
+    stage1_path = tmp_path / "densenet121_stage1_best.keras"
+    stage2_path = tmp_path / "densenet121_stage2_best.keras"
+    build_and_save_dummy_model(str(stage1_path))
+    build_and_save_dummy_model(str(stage2_path))
+
+    assert hasattr(train_module, "resolve_stage2_source_checkpoint")
+    resolved = train_module.resolve_stage2_source_checkpoint(stage1_path, stage2_path, "densenet121")
+    assert resolved.path == stage2_path.resolve()
+    assert resolved.model is not None
 
 
 def test_stage2_unfreeze_top_20_layers_and_freezes_batchnorm(tmp_path):
