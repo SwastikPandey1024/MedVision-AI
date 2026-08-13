@@ -128,7 +128,9 @@ def _render_matplotlib_diagram(model: keras.Model, svg_path: Path, png_path: Pat
         })
 
     num_blocks = len(layers_info)
-    fig, ax = plt.subplots(figsize=(max(10, num_blocks * 2.2), 6))
+    max_blocks_for_render = min(num_blocks, 40)
+    render_width = max(10, max_blocks_for_render * 2.2)
+    fig, ax = plt.subplots(figsize=(render_width, 6))
     ax.axis("off")
 
     color_map = {
@@ -149,7 +151,7 @@ def _render_matplotlib_diagram(model: keras.Model, svg_path: Path, png_path: Pat
     box_width = 1.8
     box_height = 3.5
 
-    ax.set_xlim(0, max(12, num_blocks * 2.2 + 1))
+    ax.set_xlim(0, max(12, render_width + 1))
     ax.set_ylim(0, 7)
 
     ax.text(
@@ -161,7 +163,14 @@ def _render_matplotlib_diagram(model: keras.Model, svg_path: Path, png_path: Pat
         fontsize=10, color="#555555", ha="left", va="center"
     )
 
-    for i, info in enumerate(layers_info):
+    if num_blocks > max_blocks_for_render:
+        ax.text(
+            0.5, 0.6,
+            f"Diagram truncated to first {max_blocks_for_render} of {num_blocks} layers for readability.",
+            fontsize=8, color="#555555", ha="left", va="center"
+        )
+
+    for i, info in enumerate(layers_info[:max_blocks_for_render]):
         b_color = color_map.get(info["type"], "#9B9B9B")
         
         # Rectangular block for layer
@@ -201,9 +210,9 @@ def _render_matplotlib_diagram(model: keras.Model, svg_path: Path, png_path: Pat
 
         x_offset += 2.2
 
-    plt.tight_layout()
-    plt.savefig(svg_path, format="svg", bbox_inches="tight")
-    plt.savefig(png_path, format="png", dpi=150, bbox_inches="tight")
+    fig.tight_layout(pad=0.5)
+    plt.savefig(svg_path, format="svg")
+    plt.savefig(png_path, format="png", dpi=150)
     plt.close(fig)
 
     logger.info(f"Generated Matplotlib diagram: SVG='{svg_path}', PNG='{png_path}'")
