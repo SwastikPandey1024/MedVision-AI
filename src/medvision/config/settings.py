@@ -47,7 +47,8 @@ def load_config(config_path: str | None = None) -> Dict[str, Any]:
 def get_output_base_dir() -> Path:
     """Return the absolute output directory path for training artifacts outside Git repo.
 
-    Defaults to `/kaggle/working/medvision_outputs` if running on Kaggle or if MEDVISION_OUTPUT_DIR env var is set.
+    Defaults to `/kaggle/working/medvision_outputs` on Kaggle. Local runs use a
+    sibling directory so artifacts are never written into the Git checkout.
     """
     env_dir = os.environ.get("MEDVISION_OUTPUT_DIR")
     if env_dir:
@@ -55,7 +56,7 @@ def get_output_base_dir() -> Path:
     elif os.path.exists("/kaggle/working"):
         base_path = Path("/kaggle/working/medvision_outputs")
     else:
-        base_path = Path("/kaggle/working/medvision_outputs")
+        base_path = get_project_root().parent / "medvision_outputs"
     return base_path
 
 
@@ -65,4 +66,3 @@ def get_output_dir(subfolder: str = "") -> Path:
     dir_path = base / subfolder if subfolder else base
     os.makedirs(dir_path, exist_ok=True)
     return dir_path
-

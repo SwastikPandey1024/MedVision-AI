@@ -79,6 +79,16 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
+### Kaggle Stage 1 launcher
+
+Use the versioned [Kaggle launcher notebook](notebooks/kaggle/medvision_ai_kaggle_gpu.ipynb) with the RSNA dataset attached and a GPU enabled. Its only training command is:
+
+```bash
+python scripts/train.py --mode full --stage stage1 --epochs 5 --batch-size 64 --mixed-precision --auto-resume
+```
+
+It runs the controlled preflight, discovers and validates the canonical runtime checkpoint at `/kaggle/working/medvision_outputs/checkpoints/densenet121_stage1_best.keras`, resumes it only when its optimizer state proves a completed epoch, and verifies the best checkpoint after training. Kaggle working storage is session-local: download or explicitly export checkpoints and metrics before a runtime reset.
+
 ### 3. Model Architecture Visualization (Local CPU)
 ```bash
 # Visualize Custom CNN Baseline architecture (summary TXT + SVG/PNG diagram)

@@ -44,6 +44,7 @@ from medvision.models.trainer import (
     build_callbacks,
     run_forensic_k_experiments,
     verify_checkpoint_persistence,
+    find_valid_resume_checkpoint,
 )
 from medvision.evaluation import (
     compute_classification_metrics,
@@ -129,6 +130,11 @@ def parse_args():
         type=int,
         default=None,
         help="Optional safety check: must match the epoch recovered from the checkpoint optimizer state.",
+    )
+    parser.add_argument(
+        "--auto-resume",
+        action="store_true",
+        help="Resume from the canonical valid Stage 1 checkpoint when one exists.",
     )
     return parser.parse_args()
 
@@ -276,9 +282,16 @@ def run_isolated_subprocess(args, stage: str) -> bool:
         "--stage", stage,
         "--architecture", args.architecture,
         "--batch-size", str(args.batch_size),
+        "--epochs", str(args.epochs),
     ]
     if args.mixed_precision:
         cmd.append("--mixed-precision")
+    if args.auto_resume:
+        cmd.append("--auto-resume")
+    if args.resume_from:
+        cmd.extend(["--resume-from", args.resume_from])
+    if args.resume_epoch is not None:
+        cmd.extend(["--resume-epoch", str(args.resume_epoch)])
 
     logger.info("=" * 75)
     logger.info(f"LAUNCHING ISOLATED SUBPROCESS [STAGE: {stage}]...")
@@ -592,17 +605,12 @@ def main():
             stage1_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage1_best.keras")
         else:
             stage1_ckpt_path = str(get_output_dir("checkpoints") / f"{stage1_exp_name}_best.keras")
-        stage1_tb_dir = str(get_output_dir("logs") / "tensorboard" / stage1_exp_name)
-        stage1_csv_path = str(get_output_dir("metrics") / f"{stage1_exp_name}_history.csv")
-
-        callbacks = build_callbacks(
-            checkpoint_filepath=stage1_ckpt_path,
-            tensorboard_dir=stage1_tb_dir,
-            csv_log_path=stage1_csv_path,
-            monitor_metric="val_pr_auc",
-            mode="max",
-            append_csv=(args.resume_from is not None),
-        )
+        resume_from = args.resume_from
+        if args.auto_resume and resume_from is None:
+            valid_checkpoint = find_valid_resume_checkpoint(
+                stage1_ckpt_path, args.architecture
+            )
+            resume_from = str(valid_checkpoint.path) if valid_checkpoint else None
 
         history_s1 = train_model(
             model=model,
@@ -613,9 +621,11 @@ def main():
             validation_steps=expected_val_steps,
             class_weights=class_weights,
             checkpoint_filepath=stage1_ckpt_path,
-            callbacks=callbacks,
-            resume_from=args.resume_from,
+            experiment_name=stage1_exp_name,
+            config=config,
+            resume_from=resume_from,
             initial_epoch=args.resume_epoch,
+            resume_architecture=args.architecture,
         )
         return
 
@@ -659,6 +669,10 @@ def main():
         stage1_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage1_best.keras")
     else:
         stage1_ckpt_path = str(get_output_dir("checkpoints") / f"{stage1_exp_name}_best.keras")
+    resume_from = args.resume_from
+    if args.auto_resume and resume_from is None:
+        valid_checkpoint = find_valid_resume_checkpoint(stage1_ckpt_path, args.architecture)
+        resume_from = str(valid_checkpoint.path) if valid_checkpoint else None
 
     s1_start_time = time.time()
     history_s1 = train_model(
@@ -672,8 +686,9 @@ def main():
         checkpoint_filepath=stage1_ckpt_path,
         experiment_name=stage1_exp_name,
         config=config,
-        resume_from=args.resume_from,
+        resume_from=resume_from,
         initial_epoch=args.resume_epoch,
+        resume_architecture=args.architecture,
     )
     s1_duration = time.time() - s1_start_time
 

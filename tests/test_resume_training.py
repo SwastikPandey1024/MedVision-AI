@@ -6,7 +6,13 @@ import numpy as np
 import tensorflow as tf
 import keras
 
-from medvision.models.trainer import train_model, build_callbacks, verify_checkpoint_persistence
+from medvision.models.trainer import (
+    find_valid_resume_checkpoint,
+    get_resume_monitor_baseline,
+    train_model,
+    validate_resume_checkpoint,
+    verify_checkpoint_persistence,
+)
 
 
 def create_dummy_dataset():
@@ -45,6 +51,45 @@ def test_missing_resume_checkpoint_fails_clearly(tmp_path):
             epochs=2,
             resume_from=missing_ckpt,
         )
+
+
+def test_validate_resume_checkpoint_restores_optimizer_state(tmp_path):
+    """A valid .keras checkpoint must be loadable with optimizer state intact."""
+    checkpoint_path = tmp_path / "saved_stage1.keras"
+    build_and_save_dummy_model(str(checkpoint_path))
+
+    result = validate_resume_checkpoint(checkpoint_path)
+
+    assert result.path == checkpoint_path.resolve()
+    assert result.size_bytes > 0
+    assert result.optimizer_iterations == 2
+    assert result.model.optimizer is not None
+
+
+def test_validate_resume_checkpoint_rejects_empty_file(tmp_path):
+    """An empty artifact is never eligible for auto-resume."""
+    checkpoint_path = tmp_path / "empty.keras"
+    checkpoint_path.write_bytes(b"")
+
+    with pytest.raises(ValueError, match="empty or not a file"):
+        validate_resume_checkpoint(checkpoint_path)
+
+    assert find_valid_resume_checkpoint(checkpoint_path, "densenet121") is None
+
+
+def test_resume_uses_best_historical_monitor_value(tmp_path):
+    """A resumed best-only checkpoint must retain the prior best PR-AUC threshold."""
+    csv_path = tmp_path / "history.csv"
+    csv_path.write_text("epoch,val_pr_auc\n0,0.561\n1,0.549\n", encoding="utf-8")
+
+    baseline = get_resume_monitor_baseline(
+        model=None,
+        val_ds=None,
+        validation_steps=None,
+        csv_log_path=str(csv_path),
+    )
+
+    assert baseline == pytest.approx(0.561)
 
 
 def test_existing_checkpoint_recovers_epoch_from_optimizer_state(tmp_path, capsys):

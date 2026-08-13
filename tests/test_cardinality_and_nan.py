@@ -87,7 +87,7 @@ def test_nan_guard_callback_triggers_on_nan_loss():
     callback = NaNGuardCallback()
     dummy_model = keras.Sequential([keras.layers.Dense(1)])
     dummy_model.stop_training = False
-    callback.model = dummy_model
+    callback.set_model(dummy_model)
 
     # Finite loss step should pass without error
     callback.on_batch_end(batch=0, logs={"loss": 0.5})
@@ -186,6 +186,17 @@ def test_train_script_help_string_does_not_raise_error():
     sys.argv = ["train.py", "--help"]
     with pytest.raises(SystemExit):
         parse_args()
+
+
+def test_train_script_accepts_auto_resume(monkeypatch):
+    """Verify the one-command Kaggle launcher flag is accepted by the CLI."""
+    from scripts.train import parse_args
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["train.py", "--stage", "stage1", "--auto-resume"])
+    args = parse_args()
+    assert args.stage == "stage1"
+    assert args.auto_resume is True
 
 
 def test_train_model_accepts_callbacks_parameter():

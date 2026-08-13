@@ -2,6 +2,8 @@
 
 import os
 import math
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
@@ -13,6 +15,126 @@ from medvision.config.settings import get_output_dir
 from medvision.utils.logger import get_logger
 
 logger = get_logger("medvision.models.trainer")
+
+
+@dataclass(frozen=True)
+class CheckpointValidation:
+    """Validated checkpoint metadata used by safe resume orchestration."""
+
+    path: Path
+    model: keras.Model
+    optimizer_iterations: int
+    size_bytes: int
+
+
+def validate_resume_checkpoint(
+    checkpoint_path: str | Path,
+    expected_architecture: Optional[str] = None,
+    require_optimizer_state: bool = True,
+) -> CheckpointValidation:
+    """Load and validate a complete Keras checkpoint before it can be resumed."""
+    path = Path(checkpoint_path)
+    if not path.exists():
+        raise FileNotFoundError(f"RESUME CHECKPOINT FAILURE! File not found: {path}")
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError(
+            f"RESUME CHECKPOINT FAILURE! Checkpoint is empty or not a file: {path}"
+        )
+    if path.suffix != ".keras":
+        raise ValueError(
+            f"RESUME CHECKPOINT FAILURE! Expected a complete '.keras' checkpoint: {path}"
+        )
+
+    try:
+        model = keras.models.load_model(path, compile=True)
+    except Exception as exc:
+        raise ValueError(
+            f"RESUME CHECKPOINT FAILURE! Keras could not load '{path}': {exc}"
+        ) from exc
+
+    if expected_architecture:
+        expected_name = expected_architecture.replace("_", "").lower()
+        actual_name = model.name.replace("_", "").lower()
+        if expected_name not in actual_name:
+            raise ValueError(
+                "RESUME CHECKPOINT FAILURE! Checkpoint architecture does not match "
+                f"'{expected_architecture}' (loaded model name: '{model.name}')."
+            )
+
+    optimizer = getattr(model, "optimizer", None)
+    if require_optimizer_state and optimizer is None:
+        raise ValueError(
+            "RESUME CHECKPOINT FAILURE! The checkpoint has no restored optimizer state."
+        )
+
+    iterations = int(optimizer.iterations.numpy()) if optimizer is not None else 0
+    if require_optimizer_state and iterations <= 0:
+        raise ValueError(
+            "RESUME CHECKPOINT FAILURE! The restored optimizer has zero iterations."
+        )
+
+    return CheckpointValidation(
+        path=path.resolve(),
+        model=model,
+        optimizer_iterations=iterations,
+        size_bytes=path.stat().st_size,
+    )
+
+
+def find_valid_resume_checkpoint(
+    checkpoint_path: str | Path,
+    expected_architecture: str,
+) -> Optional[CheckpointValidation]:
+    """Return the canonical checkpoint if it is resume-safe, otherwise None."""
+    path = Path(checkpoint_path)
+    if not path.exists():
+        logger.info("AUTO-RESUME: no canonical checkpoint found at %s", path)
+        return None
+    try:
+        result = validate_resume_checkpoint(path, expected_architecture)
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning("AUTO-RESUME: checkpoint rejected; starting fresh. Reason: %s", exc)
+        return None
+    logger.info(
+        "AUTO-RESUME: valid checkpoint found at %s (%d bytes, optimizer iterations=%d)",
+        result.path,
+        result.size_bytes,
+        result.optimizer_iterations,
+    )
+    return result
+
+
+def get_resume_monitor_baseline(
+    model: keras.Model,
+    val_ds: tf.data.Dataset,
+    validation_steps: Optional[int],
+    csv_log_path: str,
+    monitor_metric: str = "val_pr_auc",
+    mode: str = "max",
+) -> float:
+    """Recover the prior best monitored metric without weakening best-only saves."""
+    csv_path = Path(csv_log_path)
+    if csv_path.exists():
+        history = pd.read_csv(csv_path)
+        if monitor_metric in history and not history[monitor_metric].dropna().empty:
+            values = history[monitor_metric].dropna().astype(float)
+            return float(values.max() if mode == "max" else values.min())
+
+    logger.warning(
+        "RESUME: no usable history metric at %s; evaluating the restored checkpoint "
+        "to preserve ModelCheckpoint(save_best_only=True) semantics.",
+        csv_path,
+    )
+    metric_name = monitor_metric.removeprefix("val_")
+    result = model.evaluate(
+        val_ds, steps=validation_steps, return_dict=True, verbose=0
+    )
+    if metric_name not in result:
+        raise ValueError(
+            f"RESUME CHECKPOINT FAILURE! Validation did not report '{metric_name}', "
+            f"so the existing best checkpoint cannot be protected. Available: {list(result)}"
+        )
+    return float(result[metric_name])
 
 
 def verify_checkpoint_persistence(checkpoint_path: str) -> bool:
@@ -417,6 +539,7 @@ def build_callbacks(
     early_stopping_patience: int = 5,
     reduce_lr_patience: int = 3,
     append_csv: bool = False,
+    initial_value_threshold: Optional[float] = None,
 ) -> list:
     """Construct full suite of Keras training callbacks including NaN guards."""
     os.makedirs(os.path.dirname(checkpoint_filepath), exist_ok=True)
@@ -434,6 +557,7 @@ def build_callbacks(
             mode=mode,
             save_best_only=True,
             verbose=1,
+            initial_value_threshold=initial_value_threshold,
         ),
         # Early Stopping on val_pr_auc plateau
         keras.callbacks.EarlyStopping(
@@ -912,6 +1036,7 @@ def train_model(
     callbacks: Optional[List[keras.callbacks.Callback]] = None,
     resume_from: Optional[str] = None,
     initial_epoch: Optional[int] = None,
+    resume_architecture: Optional[str] = None,
 ) -> keras.callbacks.History:
     """Execute model training with callbacks, class weights, and explicit cardinality bounds.
 
@@ -919,14 +1044,19 @@ def train_model(
     """
     initial_epoch_for_fit = 0
 
+    resume_checkpoint: Optional[CheckpointValidation] = None
     if resume_from is not None:
         if not os.path.exists(resume_from):
             err_msg = f"RESUME CHECKPOINT FAILURE! Resume checkpoint file not found at: {resume_from}"
             logger.error(err_msg)
             raise FileNotFoundError(err_msg)
 
-        logger.info(f"Loading complete resume checkpoint from: {resume_from}")
-        model = keras.models.load_model(resume_from, compile=True)
+        checkpoint = validate_resume_checkpoint(
+            resume_from, expected_architecture=resume_architecture
+        )
+        resume_checkpoint = checkpoint
+        logger.info("Loading validated complete resume checkpoint from: %s", checkpoint.path)
+        model = checkpoint.model
         initial_epoch_for_fit = _resolve_resume_initial_epoch(
             model=model,
             train_ds=train_ds,
@@ -962,6 +1092,16 @@ def train_model(
             get_output_dir("checkpoints") / f"{experiment_name}_best.keras"
         )
 
+    if resume_checkpoint is not None:
+        destination = Path(checkpoint_filepath)
+        if destination.resolve() != resume_checkpoint.path and not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(resume_checkpoint.path, destination)
+            logger.info(
+                "RESUME: seeded missing checkpoint destination from validated source: %s",
+                destination,
+            )
+
     tensorboard_dir = str(get_output_dir("logs") / "tensorboard" / experiment_name)
     csv_log_path = str(
         get_output_dir("metrics") / f"{experiment_name}_history.csv"
@@ -974,6 +1114,18 @@ def train_model(
         patience_lr = config["training"].get("reduce_lr_patience", 3)
 
     if callbacks is None:
+        initial_value_threshold = None
+        if resume_from is not None:
+            initial_value_threshold = get_resume_monitor_baseline(
+                model=model,
+                val_ds=val_ds,
+                validation_steps=validation_steps,
+                csv_log_path=csv_log_path,
+            )
+            logger.info(
+                "RESUME: preserving prior best val_pr_auc threshold at %.6f",
+                initial_value_threshold,
+            )
         callbacks = build_callbacks(
             checkpoint_filepath=checkpoint_filepath,
             tensorboard_dir=tensorboard_dir,
@@ -983,6 +1135,7 @@ def train_model(
             early_stopping_patience=patience_es,
             reduce_lr_patience=patience_lr,
             append_csv=(resume_from is not None),
+            initial_value_threshold=initial_value_threshold,
         )
 
     logger.info(
