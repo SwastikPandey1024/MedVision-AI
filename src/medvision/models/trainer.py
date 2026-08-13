@@ -113,24 +113,192 @@ def compute_training_class_weights(train_manifest_df: pd.DataFrame) -> Dict[int,
 
 
 class BatchLossTrackerCallback(keras.callbacks.Callback):
-    """Custom callback to log per-batch loss and metrics during model.fit()."""
+    """Forensic Keras callback that tracks per-batch loss, metrics, weights, and optimizer slot variables.
 
-    def on_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None):
+    Identifies the EXACT first batch and internal state tensor that becomes non-finite during model.fit().
+    """
+
+    def __init__(self, verbose: bool = True):
+        super().__init__()
+        self.verbose = verbose
+        self.history_records: List[Dict[str, Any]] = []
+        self.first_bad_batch: Optional[Dict[str, Any]] = None
+        self.first_bad_tensor: Optional[str] = None
+
+    def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None):
         logs = logs or {}
+        b_idx = batch + 1
+
         loss_val = logs.get("loss")
-        loss_str = (
-            f"{loss_val:.4f}"
-            if isinstance(loss_val, (int, float)) and not math.isnan(loss_val)
-            else str(loss_val)
+        loss_finite = loss_val is not None and math.isfinite(float(loss_val))
+
+        # 1. Weights Finiteness & Range
+        weights_finite = True
+        bad_weight_name = None
+        w_min_val, w_max_val = 0.0, 0.0
+        all_w_vals = []
+        for w in getattr(self.model, "weights", []):
+            try:
+                w_arr = w.numpy() if hasattr(w, "numpy") else w
+                if not np.all(np.isfinite(w_arr)):
+                    weights_finite = False
+                    if bad_weight_name is None:
+                        bad_weight_name = getattr(w, "name", str(w))
+                else:
+                    all_w_vals.append(w_arr)
+            except Exception:
+                pass
+        if all_w_vals:
+            w_min_val = float(min(np.min(arr) for arr in all_w_vals))
+            w_max_val = float(max(np.max(arr) for arr in all_w_vals))
+
+        # 2. Optimizer Slot Variables & Loss Scale
+        opt_vars_finite = True
+        bad_opt_var_name = None
+        loss_scale_val = None
+        opt_min_val, opt_max_val = 0.0, 0.0
+        all_opt_vals = []
+
+        opt = getattr(self.model, "optimizer", None)
+        if opt is not None:
+            # Loss scale inspection
+            if hasattr(opt, "loss_scale"):
+                ls = opt.loss_scale
+                loss_scale_val = float(ls.numpy()) if hasattr(ls, "numpy") else float(ls)
+            elif hasattr(opt, "inner_optimizer") and hasattr(opt.inner_optimizer, "loss_scale"):
+                ls = opt.inner_optimizer.loss_scale
+                loss_scale_val = float(ls.numpy()) if hasattr(ls, "numpy") else float(ls)
+            elif hasattr(opt, "_loss_scale"):
+                ls = opt._loss_scale
+                loss_scale_val = float(ls.numpy()) if hasattr(ls, "numpy") else float(ls)
+
+            if hasattr(opt, "variables"):
+                try:
+                    for v in opt.variables():
+                        v_arr = v.numpy() if hasattr(v, "numpy") else v
+                        if not np.all(np.isfinite(v_arr)):
+                            opt_vars_finite = False
+                            if bad_opt_var_name is None:
+                                bad_opt_var_name = getattr(v, "name", str(v))
+                        else:
+                            all_opt_vals.append(v_arr)
+                except Exception:
+                    pass
+        if all_opt_vals:
+            opt_min_val = float(min(np.min(arr) for arr in all_opt_vals))
+            opt_max_val = float(max(np.max(arr) for arr in all_opt_vals))
+
+        # 3. Metric State Variables
+        metrics_finite = True
+        bad_metric_name = None
+        for m in getattr(self.model, "metrics", []):
+            for mv in getattr(m, "variables", []):
+                try:
+                    mv_arr = mv.numpy() if hasattr(mv, "numpy") else mv
+                    if not np.all(np.isfinite(mv_arr)):
+                        metrics_finite = False
+                        if bad_metric_name is None:
+                            bad_metric_name = f"{getattr(m, 'name', 'metric')}:{getattr(mv, 'name', str(mv))}"
+                except Exception:
+                    pass
+
+        # 4. Non-finite keys in logs
+        non_finite_log_keys = [
+            k for k, v in logs.items()
+            if isinstance(v, (int, float, np.number)) and not math.isfinite(float(v))
+        ]
+
+        is_clean = (
+            loss_finite
+            and weights_finite
+            and opt_vars_finite
+            and metrics_finite
+            and len(non_finite_log_keys) == 0
         )
-        logger.info(f"[BATCH {batch + 1:02d} END] fit_loss={loss_str}")
+
+        record = {
+            "batch": b_idx,
+            "loss": float(loss_val) if loss_val is not None else None,
+            "loss_finite": loss_finite,
+            "weights_finite": weights_finite,
+            "weights_range": [w_min_val, w_max_val],
+            "bad_weight": bad_weight_name,
+            "opt_vars_finite": opt_vars_finite,
+            "opt_vars_range": [opt_min_val, opt_max_val],
+            "bad_opt_var": bad_opt_var_name,
+            "loss_scale": loss_scale_val,
+            "metrics_finite": metrics_finite,
+            "bad_metric": bad_metric_name,
+            "non_finite_log_keys": non_finite_log_keys,
+            "logs": {
+                k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
+                for k, v in logs.items()
+            },
+        }
+        self.history_records.append(record)
+
+        if not is_clean and self.first_bad_batch is None:
+            self.first_bad_batch = record
+            if not loss_finite:
+                self.first_bad_tensor = f"logs['loss'] ({loss_val})"
+            elif not weights_finite:
+                self.first_bad_tensor = f"model.weights ({bad_weight_name})"
+            elif not opt_vars_finite:
+                self.first_bad_tensor = f"optimizer.variables ({bad_opt_var_name})"
+            elif not metrics_finite:
+                self.first_bad_tensor = f"metric.variables ({bad_metric_name})"
+            elif non_finite_log_keys:
+                self.first_bad_tensor = f"logs[{non_finite_log_keys[0]}] ({logs[non_finite_log_keys[0]]})"
+
+            logger.error("=" * 75)
+            logger.error(f"FORENSIC BATCH LOSS TRACKER: FIRST NON-FINITE DETECTED AT BATCH {b_idx:02d}!")
+            logger.error(f"  First Bad Step   : Batch {b_idx}")
+            logger.error(f"  First Bad Tensor : {self.first_bad_tensor}")
+            logger.error(f"  logs['loss']     : {loss_val}")
+            logger.error(f"  weights_finite   : {weights_finite} (bad={bad_weight_name})")
+            logger.error(f"  opt_vars_finite  : {opt_vars_finite} (bad={bad_opt_var_name})")
+            logger.error(f"  loss_scale       : {loss_scale_val}")
+            logger.error(f"  metrics_finite   : {metrics_finite} (bad={bad_metric_name})")
+            logger.error(f"  non-finite logs  : {non_finite_log_keys}")
+            logger.error("=" * 75)
+
+        if self.verbose:
+            ls_str = f" | loss_scale={loss_scale_val}" if loss_scale_val is not None else ""
+            loss_str = f"{loss_val:.4f}" if loss_finite else str(loss_val)
+            logger.info(
+                f"[FORENSIC K-FIT BATCH {b_idx:02d}/10] loss={loss_str} | weights_finite={weights_finite} | "
+                f"opt_vars_finite={opt_vars_finite}{ls_str} | metrics_clean={len(non_finite_log_keys)==0}"
+            )
+
+    def on_test_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None):
+        logs = logs or {}
+        v_idx = batch + 1
+        val_loss_val = logs.get("loss")
+        if self.verbose:
+            v_str = (
+                f"{val_loss_val:.4f}"
+                if val_loss_val is not None and math.isfinite(float(val_loss_val))
+                else str(val_loss_val)
+            )
+            logger.info(f"[FORENSIC VAL BATCH {v_idx:02d}/03] val_loss={v_str}")
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
         logs = logs or {}
-        loss_val = logs.get("loss")
-        val_loss_val = logs.get("val_loss")
+        e_idx = epoch + 1
+        train_loss = logs.get("loss")
+        val_loss = logs.get("val_loss")
+        t_str = (
+            f"{train_loss:.4f}"
+            if train_loss is not None and math.isfinite(float(train_loss))
+            else str(train_loss)
+        )
+        v_str = (
+            f"{val_loss:.4f}"
+            if val_loss is not None and math.isfinite(float(val_loss))
+            else str(val_loss)
+        )
         logger.info(
-            f"[EPOCH {epoch + 1:02d} END] train_loss={loss_val} | val_loss={val_loss_val}"
+            f"[FORENSIC EPOCH {e_idx:02d} END] train_loss={t_str} | val_loss={v_str}"
         )
 
 
@@ -703,3 +871,197 @@ def train_model(
 
     logger.info("Model training completed successfully.")
     return history
+
+
+def run_forensic_k_experiments(
+    architecture: str,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    class_weights: Optional[Dict[int, float]] = None,
+    strategy: Optional[tf.distribute.Strategy] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Execute controlled forensic experiments EXP_K1, EXP_K2, and EXP_K3 (10 batches max).
+
+    Goal: Pinpoint exact location of NaN inside Keras distributed fit/optimizer/metric path.
+
+    Variants:
+    - EXP_K1: Baseline model.fit with class_weight=class_weights under MirroredStrategy + mixed_float16.
+    - EXP_K2: model.fit with explicit sample_weight dataset (no class_weight parameter).
+    - EXP_K3: model.fit with explicit float32 loss computation path while global policy is mixed_float16.
+    """
+    from medvision.models.factory import build_model
+    from medvision.utils.metrics import get_model_metrics
+
+    logger.info("#" * 75)
+    logger.info("RUNNING FORENSIC EXPERIMENTS (EXP_K1, EXP_K2, EXP_K3) - 10 BATCHES MAX")
+    logger.info("#" * 75)
+
+    if strategy is None:
+        strategy = tf.distribute.get_strategy()
+
+    c0 = float(class_weights.get(0, 1.0)) if class_weights else 1.0
+    c1 = float(class_weights.get(1, 1.0)) if class_weights else 1.0
+
+    results = {}
+
+    # ==================== EXP_K1 ====================
+    logger.info("=" * 75)
+    logger.info("FORENSIC EXP_K1: model.fit(class_weight=class_weights)")
+    logger.info("=" * 75)
+    with strategy.scope():
+        model_k1 = build_model(
+            architecture=architecture,
+            input_shape=(224, 224, 3),
+            learning_rate=1e-4,
+            compile_model=True,
+            mixed_precision=True,
+            config=config,
+            strategy=strategy,
+        )
+    tracker_k1 = BatchLossTrackerCallback(verbose=True)
+
+    with strategy.scope():
+        try:
+            hist_k1 = model_k1.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=1,
+                steps_per_epoch=10,
+                validation_steps=3,
+                class_weight=class_weights,
+                callbacks=[tracker_k1],
+                verbose=1,
+            )
+            k1_history = hist_k1.history
+        except Exception as e:
+            logger.error(f"EXP_K1 exception during fit: {e}")
+            k1_history = {"loss": [float("nan")], "val_loss": [float("nan")]}
+
+    results["EXP_K1"] = {
+        "history": k1_history,
+        "first_bad_batch": tracker_k1.first_bad_batch,
+        "first_bad_tensor": tracker_k1.first_bad_tensor,
+        "batch_records": tracker_k1.history_records,
+    }
+
+    # ==================== EXP_K2 ====================
+    logger.info("=" * 75)
+    logger.info("FORENSIC EXP_K2: model.fit(sample_weight=equivalent dataset weights)")
+    logger.info("=" * 75)
+    with strategy.scope():
+        model_k2 = build_model(
+            architecture=architecture,
+            input_shape=(224, 224, 3),
+            learning_rate=1e-4,
+            compile_model=True,
+            mixed_precision=True,
+            config=config,
+            strategy=strategy,
+        )
+    tracker_k2 = BatchLossTrackerCallback(verbose=True)
+
+    def add_sample_weights(x, y):
+        y_f32 = tf.cast(y, tf.float32)
+        sw = tf.where(tf.equal(y_f32, 1.0), c1, c0)
+        return x, y, sw
+
+    train_ds_weighted = train_ds.map(add_sample_weights)
+
+    with strategy.scope():
+        try:
+            hist_k2 = model_k2.fit(
+                train_ds_weighted,
+                validation_data=val_ds,
+                epochs=1,
+                steps_per_epoch=10,
+                validation_steps=3,
+                callbacks=[tracker_k2],
+                verbose=1,
+            )
+            k2_history = hist_k2.history
+        except Exception as e:
+            logger.error(f"EXP_K2 exception during fit: {e}")
+            k2_history = {"loss": [float("nan")], "val_loss": [float("nan")]}
+
+    results["EXP_K2"] = {
+        "history": k2_history,
+        "first_bad_batch": tracker_k2.first_bad_batch,
+        "first_bad_tensor": tracker_k2.first_bad_tensor,
+        "batch_records": tracker_k2.history_records,
+    }
+
+    # ==================== EXP_K3 ====================
+    logger.info("=" * 75)
+    logger.info("FORENSIC EXP_K3: model.fit with explicit float32 loss computation")
+    logger.info("=" * 75)
+    with strategy.scope():
+        model_k3 = build_model(
+            architecture=architecture,
+            input_shape=(224, 224, 3),
+            learning_rate=1e-4,
+            compile_model=False,
+            mixed_precision=True,
+            config=config,
+            strategy=strategy,
+        )
+        optimizer_k3 = keras.optimizers.Adam(learning_rate=1e-4, clipnorm=1.0)
+        loss_fn_k3 = keras.losses.BinaryCrossentropy(dtype="float32")
+        metrics_k3 = get_model_metrics()
+        model_k3.compile(
+            optimizer=optimizer_k3,
+            loss=loss_fn_k3,
+            metrics=metrics_k3,
+        )
+    tracker_k3 = BatchLossTrackerCallback(verbose=True)
+
+    with strategy.scope():
+        try:
+            hist_k3 = model_k3.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=1,
+                steps_per_epoch=10,
+                validation_steps=3,
+                class_weight=class_weights,
+                callbacks=[tracker_k3],
+                verbose=1,
+            )
+            k3_history = hist_k3.history
+        except Exception as e:
+            logger.error(f"EXP_K3 exception during fit: {e}")
+            k3_history = {"loss": [float("nan")], "val_loss": [float("nan")]}
+
+    results["EXP_K3"] = {
+        "history": k3_history,
+        "first_bad_batch": tracker_k3.first_bad_batch,
+        "first_bad_tensor": tracker_k3.first_bad_tensor,
+        "batch_records": tracker_k3.history_records,
+    }
+
+    # Forensic Summary Comparison
+    logger.info("#" * 75)
+    logger.info("FORENSIC EXPERIMENTS SUMMARY COMPARISON")
+    logger.info("#" * 75)
+    for exp_name, exp_res in results.items():
+        bad_batch = exp_res["first_bad_batch"]
+        bad_tensor = exp_res["first_bad_tensor"]
+        last_train_loss = exp_res["history"].get("loss", [None])[-1]
+        last_val_loss = exp_res["history"].get("val_loss", [None])[-1]
+
+        if bad_batch is not None:
+            logger.info(
+                f"{exp_name:7s}: FAIL -> First non-finite at batch {bad_batch['batch']}, "
+                f"tensor: {bad_tensor} | train_loss={last_train_loss} | val_loss={last_val_loss}"
+            )
+        else:
+            t_str = f"{last_train_loss:.4f}" if last_train_loss is not None and math.isfinite(float(last_train_loss)) else str(last_train_loss)
+            v_str = f"{last_val_loss:.4f}" if last_val_loss is not None and math.isfinite(float(last_val_loss)) else str(last_val_loss)
+            logger.info(
+                f"{exp_name:7s}: PASS -> All 10 batches finite | "
+                f"train_loss={t_str} | val_loss={v_str}"
+            )
+    logger.info("#" * 75)
+
+    return results
+

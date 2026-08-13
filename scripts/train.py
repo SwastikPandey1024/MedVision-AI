@@ -17,6 +17,12 @@ import time
 import math
 import subprocess
 from pathlib import Path
+
+# Ensure src/ directory is in sys.path for direct script execution
+SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
@@ -36,6 +42,7 @@ from medvision.models.trainer import (
     run_real_batch_diagnostic,
     inspect_10_batch_losses,
     build_callbacks,
+    run_forensic_k_experiments,
 )
 from medvision.evaluation import (
     compute_classification_metrics,
@@ -87,6 +94,10 @@ def parse_args():
             "clean_fit_only",
             "stage1_fit",
             "stage1_diagnostic",
+            "forensic",
+            "exp_k1",
+            "exp_k2",
+            "exp_k3",
             "exp_a",
             "exp_b",
             "exp_c",
@@ -94,7 +105,7 @@ def parse_args():
             "stage2",
             "all",
         ],
-        help="Training stage: 'diagnostic', 'preflight_only', 'clean_fit_only', 'stage1_fit', 'exp_a', 'exp_b', 'exp_c', 'stage1', 'stage2', or 'all'.",
+        help="Training stage: 'diagnostic', 'preflight_only', 'clean_fit_only', 'forensic', 'exp_k1', 'exp_k2', 'exp_k3', 'stage1', etc.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -472,6 +483,22 @@ def main():
         logger.info(f"Smoke Test Training Loss       : {train_loss:.4f} (finite = True)")
         logger.info(f"Smoke Test Validation Loss     : {val_loss:.4f} (finite = True)")
         logger.info("Phase 3/4 GPU Smoke Test finished SUCCESSFULLY.")
+        return
+
+    # FORENSIC STAGE BRANCH: Controlled Forensic Experiments (EXP_K1, EXP_K2, EXP_K3)
+    if args.stage in ["forensic", "exp_k1", "exp_k2", "exp_k3"]:
+        logger.info("=" * 75)
+        logger.info(f"FORENSIC SUITE EXECUTION [STAGE: {args.stage}]")
+        logger.info("=" * 75)
+        forensic_results = run_forensic_k_experiments(
+            architecture=args.architecture,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            class_weights=class_weights,
+            strategy=strategy,
+            config=config,
+        )
+        logger.info("FORENSIC SUITE EXECUTION COMPLETED.")
         return
 
     # EXPERIMENT A BRANCH: Fresh Model + Fresh Dataset + model.fit ONLY (Clean Baseline)
