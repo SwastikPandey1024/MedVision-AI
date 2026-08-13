@@ -634,6 +634,7 @@ def train_model(
     checkpoint_filepath: Optional[str] = None,
     experiment_name: str = "exp_baseline_001",
     config: Optional[Dict[str, Any]] = None,
+    callbacks: Optional[List[keras.callbacks.Callback]] = None,
 ) -> keras.callbacks.History:
     """Execute model training with callbacks, class weights, and explicit cardinality bounds.
 
@@ -648,6 +649,7 @@ def train_model(
         checkpoint_filepath: Optional custom model checkpoint path.
         experiment_name: Identifier for experiment tracking.
         config: Master configuration dictionary.
+        callbacks: Optional pre-constructed list of Keras Callback objects.
 
     Returns:
         Keras History object.
@@ -670,15 +672,16 @@ def train_model(
         patience_es = config["training"].get("early_stopping_patience", 5)
         patience_lr = config["training"].get("reduce_lr_patience", 3)
 
-    callbacks = build_callbacks(
-        checkpoint_filepath=checkpoint_filepath,
-        tensorboard_dir=tensorboard_dir,
-        csv_log_path=csv_log_path,
-        monitor_metric="val_pr_auc",
-        mode="max",
-        early_stopping_patience=patience_es,
-        reduce_lr_patience=patience_lr,
-    )
+    if callbacks is None:
+        callbacks = build_callbacks(
+            checkpoint_filepath=checkpoint_filepath,
+            tensorboard_dir=tensorboard_dir,
+            csv_log_path=csv_log_path,
+            monitor_metric="val_pr_auc",
+            mode="max",
+            early_stopping_patience=patience_es,
+            reduce_lr_patience=patience_lr,
+        )
 
     logger.info(
         f"Starting model training for {epochs} epochs on experiment '{experiment_name}'..."

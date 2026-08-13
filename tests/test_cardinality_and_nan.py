@@ -188,6 +188,16 @@ def test_train_script_help_string_does_not_raise_error():
         parse_args()
 
 
+def test_train_model_accepts_callbacks_parameter():
+    """Verify train_model signature accepts callbacks parameter without TypeError."""
+    import inspect
+    from medvision.models.trainer import train_model
+
+    sig = inspect.signature(train_model)
+    assert "callbacks" in sig.parameters
+    assert sig.parameters["callbacks"].default is None
+
+
 def test_check_laptop_safety_and_provenance_guard(monkeypatch):
     """Verify full training mode fails safely when missing real RSNA dataset or GPU."""
     # Test laptop CPU guard: mode='full' on non-Kaggle with 0 GPUs
