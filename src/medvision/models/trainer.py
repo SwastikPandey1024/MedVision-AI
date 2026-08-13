@@ -9,7 +9,7 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from medvision.config.settings import get_project_root, get_output_dir
+from medvision.config.settings import get_output_dir
 from medvision.utils.logger import get_logger
 
 logger = get_logger("medvision.models.trainer")
@@ -49,6 +49,64 @@ def verify_checkpoint_persistence(checkpoint_path: str) -> bool:
         f"CHECKPOINT PERSISTENCE: PASS | PATH: {p.resolve()} | SIZE: {size_mb:.2f} MB"
     )
     return True
+
+
+def _resolve_resume_initial_epoch(
+    model: keras.Model,
+    train_ds: tf.data.Dataset,
+    steps_per_epoch: Optional[int],
+    initial_epoch: Optional[int],
+) -> int:
+    """Recover the completed epoch count from a restored optimizer state.
+
+    ModelCheckpoint saves at epoch boundaries, so a complete checkpoint's optimizer
+    iteration count must be an exact multiple of the number of training steps in an
+    epoch.  Treating any other value as resumable would risk replaying data with an
+    incorrect epoch index.
+    """
+    optimizer = getattr(model, "optimizer", None)
+    if optimizer is None:
+        raise ValueError(
+            "RESUME CHECKPOINT FAILURE! The checkpoint has no restored optimizer "
+            "state, so a safe resume epoch cannot be determined."
+        )
+
+    resolved_steps = steps_per_epoch
+    if resolved_steps is None:
+        cardinality = tf.data.experimental.cardinality(train_ds)
+        cardinality_value = int(cardinality.numpy())
+        if cardinality_value < 0:
+            raise ValueError(
+                "RESUME CHECKPOINT FAILURE! steps_per_epoch is required when the "
+                "training dataset has unknown or infinite cardinality."
+            )
+        resolved_steps = cardinality_value
+
+    if resolved_steps <= 0:
+        raise ValueError("RESUME CHECKPOINT FAILURE! steps_per_epoch must be positive.")
+
+    optimizer_iterations = int(optimizer.iterations.numpy())
+    if optimizer_iterations == 0:
+        raise ValueError(
+            "RESUME CHECKPOINT FAILURE! The checkpoint optimizer has zero "
+            "iterations, so it does not represent a completed training epoch."
+        )
+    if optimizer_iterations % resolved_steps != 0:
+        raise ValueError(
+            "RESUME CHECKPOINT FAILURE! Optimizer iterations "
+            f"({optimizer_iterations}) are not divisible by steps_per_epoch "
+            f"({resolved_steps}); refusing to resume at an uncertain epoch."
+        )
+
+    recovered_initial_epoch = optimizer_iterations // resolved_steps
+    if initial_epoch is not None and initial_epoch != recovered_initial_epoch:
+        raise ValueError(
+            "RESUME CHECKPOINT FAILURE! Supplied initial_epoch "
+            f"({initial_epoch}) does not match the checkpoint's recovered epoch "
+            f"({recovered_initial_epoch})."
+        )
+
+    return recovered_initial_epoch
 
 
 
@@ -853,13 +911,13 @@ def train_model(
     config: Optional[Dict[str, Any]] = None,
     callbacks: Optional[List[keras.callbacks.Callback]] = None,
     resume_from: Optional[str] = None,
-    initial_epoch: int = 0,
+    initial_epoch: Optional[int] = None,
 ) -> keras.callbacks.History:
     """Execute model training with callbacks, class weights, and explicit cardinality bounds.
 
     Supports resuming training from an existing model checkpoint (.keras file).
     """
-    root = get_project_root()
+    initial_epoch_for_fit = 0
 
     if resume_from is not None:
         if not os.path.exists(resume_from):
@@ -867,20 +925,34 @@ def train_model(
             logger.error(err_msg)
             raise FileNotFoundError(err_msg)
 
-        logger.info(f"Loading existing model checkpoint from: {resume_from}")
-        model = keras.models.load_model(resume_from, safe_mode=False)
-
-        if initial_epoch == 0:
-            initial_epoch = 1
+        logger.info(f"Loading complete resume checkpoint from: {resume_from}")
+        model = keras.models.load_model(resume_from, compile=True)
+        initial_epoch_for_fit = _resolve_resume_initial_epoch(
+            model=model,
+            train_ds=train_ds,
+            steps_per_epoch=steps_per_epoch,
+            initial_epoch=initial_epoch,
+        )
 
         print("\n" + "=" * 75)
         print(f"RESUME CHECKPOINT: {Path(resume_from).resolve()}")
-        print(f"RESUME EPOCH     : {initial_epoch}")
+        print(f"OPTIMIZER STEPS  : {int(model.optimizer.iterations.numpy())}")
+        print(f"RESUME EPOCH     : {initial_epoch_for_fit}")
         print(f"TARGET EPOCHS    : {epochs}")
         print("=" * 75 + "\n")
         logger.info(
-            f"RESUME CHECKPOINT: {resume_from} | RESUME EPOCH: {initial_epoch} | TARGET EPOCHS: {epochs}"
+            "RESUME CHECKPOINT: %s | OPTIMIZER STEPS: %d | "
+            "RECOVERED INITIAL EPOCH: %d | TARGET EPOCHS: %d",
+            resume_from,
+            int(model.optimizer.iterations.numpy()),
+            initial_epoch_for_fit,
+            epochs,
         )
+
+    elif initial_epoch is not None:
+        if initial_epoch != 0:
+            raise ValueError("initial_epoch can only be used together with resume_from.")
+        initial_epoch_for_fit = 0
 
     if model is None:
         raise ValueError("train_model requires a valid model instance or a valid resume_from checkpoint path.")
@@ -910,11 +982,11 @@ def train_model(
             mode="max",
             early_stopping_patience=patience_es,
             reduce_lr_patience=patience_lr,
-            append_csv=(resume_from is not None or initial_epoch > 0),
+            append_csv=(resume_from is not None),
         )
 
     logger.info(
-        f"Starting model training for {epochs} epochs (initial_epoch={initial_epoch}) on experiment '{experiment_name}'..."
+        f"Starting model training for {epochs} epochs (initial_epoch={initial_epoch_for_fit}) on experiment '{experiment_name}'..."
     )
     logger.info(f"Checkpoint destination  : {checkpoint_filepath}")
     logger.info(f"Configured steps_per_epoch : {steps_per_epoch}")
@@ -924,7 +996,7 @@ def train_model(
         train_ds,
         validation_data=val_ds,
         epochs=epochs,
-        initial_epoch=initial_epoch,
+        initial_epoch=initial_epoch_for_fit,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
         class_weight=class_weights,
