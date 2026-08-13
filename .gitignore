@@ -25,11 +25,15 @@ MANIFEST
 # Virtual Environments
 .venv/
 .venv_codex/
+.venv_kaggle_compat/
 venv/
 ENV/
 env/
 env.bak/
 venv.bak/
+
+# Local final ML artifacts
+final_artifacts/
 
 # Datasets & Raw Files (CRITICAL: Do not commit datasets)
 data/raw/*
