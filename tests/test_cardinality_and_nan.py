@@ -169,6 +169,14 @@ def test_train_script_stage_choices_include_exp_a_and_exp_b():
     args_c = parse_args()
     assert args_c.stage == "exp_c"
 
+    sys.argv = ["train.py", "--stage", "preflight_only"]
+    args_p1 = parse_args()
+    assert args_p1.stage == "preflight_only"
+
+    sys.argv = ["train.py", "--stage", "clean_fit_only"]
+    args_p2 = parse_args()
+    assert args_p2.stage == "clean_fit_only"
+
 
 def test_train_script_help_string_does_not_raise_error():
     """Verify parse_args --help formatting does not raise TypeError."""

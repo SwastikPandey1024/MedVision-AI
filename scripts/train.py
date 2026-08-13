@@ -81,8 +81,20 @@ def parse_args():
         "--stage",
         type=str,
         default="diagnostic",
-        choices=["diagnostic", "stage1_diagnostic", "exp_a", "exp_b", "exp_c", "stage1", "stage2", "all"],
-        help="Training stage to execute: 'diagnostic', 'stage1_diagnostic', 'exp_a' (fit ONLY), 'exp_b' (in-process reset), 'exp_c' (subprocess preflight + clean fit), 'stage1', 'stage2', or 'all'.",
+        choices=[
+            "diagnostic",
+            "preflight_only",
+            "clean_fit_only",
+            "stage1_fit",
+            "stage1_diagnostic",
+            "exp_a",
+            "exp_b",
+            "exp_c",
+            "stage1",
+            "stage2",
+            "all",
+        ],
+        help="Training stage: 'diagnostic', 'preflight_only', 'clean_fit_only', 'stage1_fit', 'exp_a', 'exp_b', 'exp_c', 'stage1', 'stage2', or 'all'.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -208,36 +220,36 @@ def run_10_batch_benchmark(
     print("\n" + "=" * 70)
     print("FINAL PREFLIGHT VERIFICATION SUMMARY")
     print("=" * 70)
-    print(f"TRAIN FIT LOSS         : {'finite' if train_loss_finite else 'NaN/Inf'} (value={train_loss:.4f})")
-    print(f"VALIDATION FIT LOSS    : {'finite' if val_loss_finite else 'NaN/Inf'} (value={val_loss:.4f})")
-    print(f"TRAIN PREDICTIONS      : {'finite' if all_finite else 'NaN/Inf'}")
-    print(f"VALIDATION PREDICTIONS : {'finite' if all_finite else 'NaN/Inf'}")
-    print(f"GRADIENTS              : {'finite' if all_finite else 'NaN/Inf'}")
-    print(f"WEIGHTS                : {'finite' if weights_finite else 'NaN/Inf'}")
-    print(f"CLIPNORM ACTIVE (1.0)  : {'YES' if has_clipnorm else 'NO'}")
-    print(f"EXPECTED TRAIN STEPS   : {expected_train_steps}")
-    print(f"ACTUAL TRAIN STEPS     : {expected_train_steps}")
-    print(f"EXPECTED VAL STEPS     : {expected_val_steps}")
-    print(f"ACTUAL VAL STEPS       : {expected_val_steps}")
-    print(f"Global Batch Size      : {global_batch_size}")
-    print(f"Replicas               : {num_replicas}")
-    print(f"Per-Replica Batch      : {per_replica_batch_size}")
-    print(f"Training Sec/Step      : {sec_per_step:.4f} s")
-    print(f"Estimated Epoch Time   : {est_epoch_min:.2f} minutes")
-    print(f"FINAL PREFLIGHT STATUS : {'PASS' if all_finite else 'FAIL'}")
+    print(f"TRAIN FIT LOSS                  : {'finite' if train_loss_finite else 'NaN/Inf'} (value={train_loss:.4f})")
+    print(f"VALIDATION FIT LOSS             : {'finite' if val_loss_finite else 'NaN/Inf'} (value={val_loss:.4f})")
+    print(f"TRAIN PREDICTIONS               : {'finite' if all_finite else 'NaN/Inf'}")
+    print(f"VALIDATION PREDICTIONS          : {'finite' if all_finite else 'NaN/Inf'}")
+    print(f"GRADIENTS                       : {'finite' if all_finite else 'NaN/Inf'}")
+    print(f"WEIGHTS                         : {'finite' if weights_finite else 'NaN/Inf'}")
+    print(f"CLIPNORM ACTIVE (1.0)           : {'YES' if has_clipnorm else 'NO'}")
+    print(f"BENCHMARK TRAIN STEPS EXECUTED  : 10")
+    print(f"BENCHMARK VAL STEPS EXECUTED    : 3")
+    print(f"FULL EPOCH PROJECTED TRAIN STEPS: {expected_train_steps}")
+    print(f"FULL EPOCH PROJECTED VAL STEPS  : {expected_val_steps}")
+    print(f"Global Batch Size               : {global_batch_size}")
+    print(f"Replicas                        : {num_replicas}")
+    print(f"Per-Replica Batch               : {per_replica_batch_size}")
+    print(f"Training Sec/Step               : {sec_per_step:.4f} s")
+    print(f"Estimated Epoch Time            : {(sec_per_step * expected_train_steps) / 60.0:.2f} minutes")
+    print(f"FINAL PREFLIGHT STATUS          : {'PASS' if all_finite else 'FAIL'}")
     print("=" * 70 + "\n")
 
-    return sec_per_step, est_epoch_min, all_finite
+    return sec_per_step, (sec_per_step * expected_train_steps) / 60.0, all_finite
 
 
-def run_isolated_preflight_subprocess(args) -> bool:
-    """Execute preflight diagnostic and benchmark in an isolated subprocess boundary."""
+def run_isolated_subprocess(args, stage: str) -> bool:
+    """Launch an isolated Python subprocess to execute a specific entrypoint stage."""
     script_path = os.path.abspath(__file__)
     cmd = [
         sys.executable,
         script_path,
         "--mode", args.mode,
-        "--stage", "diagnostic",
+        "--stage", stage,
         "--architecture", args.architecture,
         "--batch-size", str(args.batch_size),
     ]
@@ -245,7 +257,7 @@ def run_isolated_preflight_subprocess(args) -> bool:
         cmd.append("--mixed-precision")
 
     logger.info("=" * 75)
-    logger.info("LAUNCHING ISOLATED PREFLIGHT SUBPROCESS BOUNDARY...")
+    logger.info(f"LAUNCHING ISOLATED SUBPROCESS [STAGE: {stage}]...")
     logger.info(f"Subprocess Command: {' '.join(cmd)}")
     logger.info("=" * 75)
 
@@ -258,15 +270,14 @@ def run_isolated_preflight_subprocess(args) -> bool:
 
     res = subprocess.run(cmd, env=env)
     if res.returncode != 0:
-        logger.error(f"ISOLATED PREFLIGHT SUBPROCESS FAILED with exit code {res.returncode}")
+        logger.error(f"SUBPROCESS [STAGE: {stage}] FAILED with exit code {res.returncode}")
         return False
-    logger.info("ISOLATED PREFLIGHT SUBPROCESS PASSED 100%. Process state reset.")
+    logger.info(f"SUBPROCESS [STAGE: {stage}] COMPLETED SUCCESSFULLY.")
     return True
 
 
 def main():
     args = parse_args()
-    config = load_config()
     root = get_project_root()
 
     logger.info("=" * 75)
@@ -277,6 +288,52 @@ def main():
     logger.info(f"Target Stage         : {args.stage}")
     logger.info(f"Max Epochs per Stage : {args.epochs}")
     logger.info(f"Smoke Test Mode      : {args.smoke_test}")
+
+    # TWO-PROCESS ORCHESTRATORS (Run before parent TensorFlow initialization)
+    if args.stage == "exp_c":
+        logger.info("=" * 75)
+        logger.info("EXPERIMENT C: TWO-PROCESS ISOLATED EXECUTION FRAMEWORK")
+        logger.info("  PROCESS 1: Preflight Diagnostic & 10-Batch Benchmark Subprocess")
+        logger.info("  PROCESS 2: Clean Process model.fit Subprocess (Fresh MirroredStrategy + Model)")
+        logger.info("=" * 75)
+
+        p1_ok = run_isolated_subprocess(args, stage="preflight_only")
+        if not p1_ok:
+            logger.error("EXPERIMENT C FAILED: Process 1 (Preflight) failed.")
+            sys.exit(1)
+
+        p2_ok = run_isolated_subprocess(args, stage="clean_fit_only")
+        if not p2_ok:
+            logger.error("EXPERIMENT C FAILED: Process 2 (Clean Fit) failed.")
+            sys.exit(1)
+
+        logger.info("=" * 75)
+        logger.info("EXPERIMENT C RESULT: BOTH PROCESSES COMPLETED WITH FINITE LOSS.")
+        logger.info("EXPERIMENT C TWO-PROCESS ISOLATION STATUS: PASS")
+        logger.info("=" * 75)
+        return
+
+    if args.stage == "stage1":
+        logger.info("=" * 75)
+        logger.info("STAGE 1 TRAINING: TWO-PROCESS ISOLATED EXECUTION FRAMEWORK")
+        logger.info("  PROCESS 1: Preflight Diagnostic & 10-Batch Benchmark Subprocess")
+        logger.info("  PROCESS 2: Stage 1 Full Head Training Subprocess (5 Epochs)")
+        logger.info("=" * 75)
+
+        p1_ok = run_isolated_subprocess(args, stage="preflight_only")
+        if not p1_ok:
+            logger.error("STAGE 1 ABORTED: Preflight subprocess failed.")
+            sys.exit(1)
+
+        p2_ok = run_isolated_subprocess(args, stage="stage1_fit")
+        if not p2_ok:
+            logger.error("STAGE 1 ABORTED: Stage 1 training subprocess failed.")
+            sys.exit(1)
+
+        logger.info("STAGE 1 TRAINING COMPLETED SUCCESSFULLY.")
+        return
+
+    config = load_config()
 
     # Hardware Strategy Setup
     gpus = tf.config.list_physical_devices("GPU")
@@ -417,10 +474,10 @@ def main():
         logger.info("Phase 3/4 GPU Smoke Test finished SUCCESSFULLY.")
         return
 
-    # EXPERIMENT A BRANCH: Fresh Model + Fresh Dataset + model.fit ONLY (No diagnostics before fit)
+    # EXPERIMENT A BRANCH: Fresh Model + Fresh Dataset + model.fit ONLY (Clean Baseline)
     if args.stage == "exp_a":
         logger.info("=" * 75)
-        logger.info("EXPERIMENT A: FRESH MODEL + FRESH DATASET + model.fit ONLY (10 BATCHES)")
+        logger.info("EXPERIMENT A: CLEAN BASELINE (FRESH MODEL + FRESH DATASET + model.fit ONLY)")
         logger.info("=" * 75)
         callbacks = build_callbacks(
             checkpoint_filepath=str(root / "artifacts" / "experiments" / "exp_a_best.keras"),
@@ -448,101 +505,15 @@ def main():
         logger.info("=" * 75)
         return
 
-    if args.stage == "exp_b":
+    # CLEAN FIT ONLY BRANCH (Process 2 of Experiment C)
+    if args.stage == "clean_fit_only":
         logger.info("=" * 75)
-        logger.info("EXPERIMENT B: DIAGNOSTICS + RE-INITIALIZATION + 10-BATCH model.fit()")
+        logger.info("CLEAN FIT ONLY (PROCESS 2 OF EXP_C: CLEAN PROCESS BOUNDARY)")
         logger.info("=" * 75)
-
-        # Phase D: Single-Batch Step Diagnostic
-        diag_results = run_real_batch_diagnostic(
-            model=model,
-            train_ds=train_ds,
-            class_weights=class_weights,
-            strategy=strategy,
-        )
-
-        # Phase D2: 10-Batch Real RSNA Benchmark
-        sec_per_step, est_epoch_min, is_finite = run_10_batch_benchmark(
-            model=model,
-            train_ds=train_ds,
-            val_ds=val_ds,
-            strategy=strategy,
-            global_batch_size=global_batch_size,
-            num_replicas=num_replicas,
-            per_replica_batch_size=per_replica_batch_size,
-            expected_train_steps=expected_train_steps,
-            expected_val_steps=expected_val_steps,
-            class_weights=class_weights,
-        )
-
-        logger.info("Re-initializing fresh model and fresh dataset iterators for Experiment B model.fit()...")
-        if args.mode == "full":
-            if len(train_shards) > 0:
-                train_ds = build_tfrecord_dataset(train_shards, batch_size=per_replica_batch_size, is_training=True, repeat=False)
-                val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=per_replica_batch_size, is_training=False, repeat=False)
-            else:
-                train_ds = create_real_rsna_dataset(df_train, batch_size=per_replica_batch_size, is_training=True)
-                val_ds = create_real_rsna_dataset(df_val, batch_size=per_replica_batch_size, is_training=False)
-        else:
-            train_ds, val_ds, _ = load_dev_subset_datasets(
-                batch_size=per_replica_batch_size,
-                target_size=(224, 224),
-            )
-
-        with strategy.scope():
-            fresh_model = build_model(
-                architecture=args.architecture,
-                input_shape=(224, 224, 3),
-                num_classes=1,
-                config=config,
-                compile_model=True,
-                strategy=strategy,
-            )
-
         callbacks = build_callbacks(
-            checkpoint_filepath=str(root / "artifacts" / "experiments" / "exp_b_best.keras"),
-            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "exp_b"),
-            csv_log_path=str(root / "artifacts" / "experiments" / "exp_b_history.csv"),
-            monitor_metric="val_pr_auc",
-            mode="max",
-        )
-
-        history = fresh_model.fit(
-            train_ds,
-            validation_data=val_ds,
-            epochs=1,
-            steps_per_epoch=10,
-            validation_steps=3,
-            class_weight=class_weights,
-            callbacks=callbacks,
-            verbose=1,
-        )
-
-        loss_end = history.history["loss"][-1]
-        val_loss_end = history.history["val_loss"][-1]
-        logger.info("=" * 75)
-        logger.info(f"EXPERIMENT B RESULT: train_loss={loss_end:.4f} | val_loss={val_loss_end:.4f}")
-        logger.info(f"EXPERIMENT B STATUS: {'PASS' if math.isfinite(loss_end) and math.isfinite(val_loss_end) else 'FAIL (NaN)'}")
-        logger.info("=" * 75)
-        return
-
-    if args.stage == "exp_c":
-        logger.info("=" * 75)
-        logger.info("EXPERIMENT C: ISOLATED SUBPROCESS PREFLIGHT + CLEAN PROCESS model.fit()")
-        logger.info("=" * 75)
-
-        # Step 1: Run isolated preflight in a subprocess boundary
-        success = run_isolated_preflight_subprocess(args)
-        if not success:
-            logger.error("EXPERIMENT C FAILED during preflight subprocess.")
-            sys.exit(1)
-
-        # Step 2: Now run model.fit on a completely fresh model in a clean process state
-        logger.info("Executing 10-batch model.fit() in clean process state...")
-        callbacks = build_callbacks(
-            checkpoint_filepath=str(root / "artifacts" / "experiments" / "exp_c_best.keras"),
-            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "exp_c"),
-            csv_log_path=str(root / "artifacts" / "experiments" / "exp_c_history.csv"),
+            checkpoint_filepath=str(root / "artifacts" / "experiments" / "clean_fit_best.keras"),
+            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "clean_fit"),
+            csv_log_path=str(root / "artifacts" / "experiments" / "clean_fit_history.csv"),
             monitor_metric="val_pr_auc",
             mode="max",
         )
@@ -560,85 +531,77 @@ def main():
         loss_end = history.history["loss"][-1]
         val_loss_end = history.history["val_loss"][-1]
         logger.info("=" * 75)
-        logger.info(f"EXPERIMENT C RESULT: train_loss={loss_end:.4f} | val_loss={val_loss_end:.4f}")
-        logger.info(f"EXPERIMENT C STATUS: {'PASS' if math.isfinite(loss_end) and math.isfinite(val_loss_end) else 'FAIL (NaN)'}")
+        logger.info(f"CLEAN FIT RESULT: train_loss={loss_end:.4f} | val_loss={val_loss_end:.4f}")
+        logger.info(f"CLEAN FIT STATUS: {'PASS' if math.isfinite(loss_end) and math.isfinite(val_loss_end) else 'FAIL (NaN)'}")
         logger.info("=" * 75)
+        if not math.isfinite(loss_end) or not math.isfinite(val_loss_end):
+            sys.exit(1)
         return
 
-    # Phase D: Single-Batch Step Diagnostic (CTO Requirement D)
-    diag_results = run_real_batch_diagnostic(
-        model=model,
-        train_ds=train_ds,
-        class_weights=class_weights,
-        strategy=strategy,
-    )
-
-    if diag_results["first_failure"] != "NONE (ALL STAGES FINITE)":
-        logger.error(f"CRITICAL DIAGNOSTIC FAILURE: Non-finite values traced to: {diag_results['first_failure']}")
-        sys.exit(1)
-
-    # Phase D2: 10-Batch Real RSNA Benchmark & Finiteness Check (CTO Requirement G)
-    sec_per_step, est_epoch_min, is_finite = run_10_batch_benchmark(
-        model=model,
-        train_ds=train_ds,
-        val_ds=val_ds,
-        strategy=strategy,
-        global_batch_size=global_batch_size,
-        num_replicas=num_replicas,
-        per_replica_batch_size=per_replica_batch_size,
-        expected_train_steps=expected_train_steps,
-        expected_val_steps=expected_val_steps,
-        class_weights=class_weights,
-    )
-
-    if not is_finite:
-        logger.error("CRITICAL BENCHMARK FAILURE: Non-finite loss/predictions/gradients detected during 10-batch benchmark!")
-        sys.exit(1)
-
-    if args.stage in ["diagnostic", "stage1_diagnostic"]:
+    # STAGE 1 FIT ONLY BRANCH (Process 2 of Stage 1)
+    if args.stage == "stage1_fit":
         logger.info("=" * 75)
-        logger.info("DIAGNOSTIC & BENCHMARK COMPLETED SUCCESSFULLY.")
-        logger.info(f"EXPECTED TRAIN STEPS: {expected_train_steps}")
-        logger.info(f"ACTUAL TRAIN STEPS  : {expected_train_steps}")
-        logger.info(f"EXPECTED VAL STEPS  : {expected_val_steps}")
-        logger.info(f"ACTUAL VAL STEPS    : {expected_val_steps}")
-        logger.info(f"10-BATCH Finiteness : {'PASS' if is_finite else 'FAIL'}")
-        logger.info(f"Estimated Epoch Duration: {est_epoch_min:.2f} minutes")
-        logger.info("CONTROLLED STOP ACTIVATED BEFORE STAGE 1 TRAINING.")
-        logger.info("Pass --stage stage1 to execute Stage 1 Head Training.")
+        logger.info("STAGE 1 FIT ONLY (PROCESS 2 OF STAGE 1: CLEAN PROCESS BOUNDARY)")
         logger.info("=" * 75)
-        return
+        stage1_exp_name = f"{args.architecture}_stage1_{args.mode}"
+        stage1_ckpt_path = str(root / "artifacts" / "experiments" / f"{stage1_exp_name}_best.keras")
+        stage1_tb_dir = str(root / "artifacts" / "tensorboard" / stage1_exp_name)
+        stage1_csv_path = str(root / "artifacts" / "experiments" / f"{stage1_exp_name}_history.csv")
 
-    # Phase E: Stage 1 DenseNet121 Head Training
-    logger.info("=" * 75)
-    logger.info("PHASE E: DenseNet121 Stage 1 Head Training (Backbone Frozen)")
-    logger.info("=" * 75)
-
-    # Re-initialize fresh model and fresh dataset iterators for Stage 1 training
-    # to eliminate any state mutation or dataset iterator exhaustion from preflight diagnostics.
-    logger.info("Re-initializing fresh model and fresh dataset iterators for Stage 1 training...")
-    if args.mode == "full":
-        if len(train_shards) > 0:
-            train_ds = build_tfrecord_dataset(train_shards, batch_size=per_replica_batch_size, is_training=True, repeat=False)
-            val_ds = build_tfrecord_dataset(list(tfrecord_dir.glob("val_*.tfrecord")), batch_size=per_replica_batch_size, is_training=False, repeat=False)
-        else:
-            train_ds = create_real_rsna_dataset(df_train, batch_size=per_replica_batch_size, is_training=True)
-            val_ds = create_real_rsna_dataset(df_val, batch_size=per_replica_batch_size, is_training=False)
-    else:
-        train_ds, val_ds, _ = load_dev_subset_datasets(
-            batch_size=per_replica_batch_size,
-            target_size=(224, 224),
+        callbacks = build_callbacks(
+            checkpoint_filepath=stage1_ckpt_path,
+            tensorboard_dir=stage1_tb_dir,
+            csv_log_path=stage1_csv_path,
+            monitor_metric="val_pr_auc",
+            mode="max",
         )
 
-    with strategy.scope():
-        model = build_model(
-            architecture=args.architecture,
-            input_shape=(224, 224, 3),
-            num_classes=1,
-            config=config,
-            compile_model=True,
+        history_s1 = train_model(
+            model=model,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            epochs=args.epochs,
+            steps_per_epoch=expected_train_steps,
+            validation_steps=expected_val_steps,
+            class_weights=class_weights,
+            callbacks=callbacks,
+        )
+        return
+
+    if args.stage in ["diagnostic", "preflight_only", "stage1_diagnostic"]:
+        diag_results = run_real_batch_diagnostic(
+            model=model,
+            train_ds=train_ds,
+            class_weights=class_weights,
             strategy=strategy,
         )
+
+        if diag_results["first_failure"] != "NONE (ALL STAGES FINITE)":
+            logger.error(f"CRITICAL DIAGNOSTIC FAILURE: Non-finite values traced to: {diag_results['first_failure']}")
+            sys.exit(1)
+
+        sec_per_step, est_epoch_min, is_finite = run_10_batch_benchmark(
+            model=model,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            strategy=strategy,
+            global_batch_size=global_batch_size,
+            num_replicas=num_replicas,
+            per_replica_batch_size=per_replica_batch_size,
+            expected_train_steps=expected_train_steps,
+            expected_val_steps=expected_val_steps,
+            class_weights=class_weights,
+        )
+
+        if not is_finite:
+            logger.error("CRITICAL BENCHMARK FAILURE: Non-finite loss/predictions/gradients detected during 10-batch benchmark!")
+            sys.exit(1)
+
+        logger.info("=" * 75)
+        logger.info("PREFLIGHT DIAGNOSTIC & BENCHMARK COMPLETED SUCCESSFULLY.")
+        logger.info("CONTROLLED STOP ACTIVATED BEFORE STAGE 1 TRAINING.")
+        logger.info("=" * 75)
+        return
 
     stage1_exp_name = f"{args.architecture}_stage1_{args.mode}"
     stage1_ckpt_path = str(root / "artifacts" / "experiments" / f"{stage1_exp_name}_best.keras")
