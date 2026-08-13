@@ -118,6 +118,18 @@ def parse_args():
         action="store_true",
         help="Enable mixed_float16 precision policy.",
     )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Path to existing .keras model checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--resume-epoch",
+        type=int,
+        default=None,
+        help="Explicit initial epoch index to resume training from (0-indexed). Defaults to 1 if resume-from is provided.",
+    )
     return parser.parse_args()
 
 
@@ -583,12 +595,15 @@ def main():
         stage1_tb_dir = str(get_output_dir("logs") / "tensorboard" / stage1_exp_name)
         stage1_csv_path = str(get_output_dir("metrics") / f"{stage1_exp_name}_history.csv")
 
+        initial_epoch_val = args.resume_epoch if args.resume_epoch is not None else (1 if args.resume_from else 0)
+
         callbacks = build_callbacks(
             checkpoint_filepath=stage1_ckpt_path,
             tensorboard_dir=stage1_tb_dir,
             csv_log_path=stage1_csv_path,
             monitor_metric="val_pr_auc",
             mode="max",
+            append_csv=(args.resume_from is not None or initial_epoch_val > 0),
         )
 
         history_s1 = train_model(
@@ -601,6 +616,8 @@ def main():
             class_weights=class_weights,
             checkpoint_filepath=stage1_ckpt_path,
             callbacks=callbacks,
+            resume_from=args.resume_from,
+            initial_epoch=initial_epoch_val,
         )
         return
 
@@ -645,6 +662,8 @@ def main():
     else:
         stage1_ckpt_path = str(get_output_dir("checkpoints") / f"{stage1_exp_name}_best.keras")
 
+    initial_epoch_val = args.resume_epoch if args.resume_epoch is not None else (1 if args.resume_from else 0)
+
     s1_start_time = time.time()
     history_s1 = train_model(
         model=model,
@@ -657,6 +676,8 @@ def main():
         checkpoint_filepath=stage1_ckpt_path,
         experiment_name=stage1_exp_name,
         config=config,
+        resume_from=args.resume_from,
+        initial_epoch=initial_epoch_val,
     )
     s1_duration = time.time() - s1_start_time
 
