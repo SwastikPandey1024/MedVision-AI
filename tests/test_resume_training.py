@@ -14,6 +14,7 @@ from medvision.models.trainer import (
     resolve_stage2_source_checkpoint,
     train_model,
     validate_resume_checkpoint,
+    validate_stage2_source_checkpoint,
     verify_checkpoint_persistence,
 )
 
@@ -78,6 +79,36 @@ def test_validate_resume_checkpoint_rejects_empty_file(tmp_path):
         validate_resume_checkpoint(checkpoint_path)
 
     assert find_valid_resume_checkpoint(checkpoint_path, "densenet121") is None
+
+
+def test_validate_resume_checkpoint_rejects_missing_optimizer_state(tmp_path):
+    """Stage 1 auto-resume must reject a valid weights-only checkpoint that cannot restore optimizer state."""
+    checkpoint_path = tmp_path / "weights_only_stage1.keras"
+    inp = keras.layers.Input(shape=(224, 224, 3))
+    x = keras.layers.GlobalAveragePooling2D()(inp)
+    out = keras.layers.Dense(1, activation="sigmoid")(x)
+    model = keras.Model(inputs=inp, outputs=out)
+    model.compile(optimizer="adam", loss="binary_crossentropy", metrics=[keras.metrics.AUC(curve="PR", name="pr_auc")])
+    model.save(checkpoint_path, include_optimizer=False)
+
+    with pytest.raises(ValueError, match="no restored optimizer state|zero iterations"):
+        validate_resume_checkpoint(checkpoint_path)
+
+
+def test_stage2_source_checkpoint_accepts_valid_weights_without_optimizer_state(tmp_path):
+    """Stage 2 may consume a valid Stage 1 model checkpoint even when the Stage 1 optimizer state cannot be restored."""
+    checkpoint_path = tmp_path / "densenet121_stage1_best.keras"
+    inp = keras.layers.Input(shape=(224, 224, 3))
+    x = keras.layers.GlobalAveragePooling2D()(inp)
+    out = keras.layers.Dense(1, activation="sigmoid")(x)
+    model = keras.Model(inputs=inp, outputs=out)
+    model.save(checkpoint_path, include_optimizer=False)
+
+    result = validate_stage2_source_checkpoint(checkpoint_path, "model")
+    assert result.path == checkpoint_path.resolve()
+    assert result.size_bytes > 0
+    assert result.model is not None
+    assert result.optimizer_iterations == 0
 
 
 def test_resume_uses_best_historical_monitor_value(tmp_path):
@@ -174,12 +205,14 @@ def test_stage2_checkpoint_resolution_prefers_valid_stage2_then_stage1(tmp_path)
 
     stage2_result = resolve_stage2_source_checkpoint(stage1_path, stage2_path, "densenet121")
     assert stage2_result.path == stage2_path.resolve()
-    assert stage2_result.optimizer_iterations > 0
+    assert stage2_result.model is not None
+    assert stage2_result.optimizer_iterations >= 0
 
     stage2_path.unlink()
     stage1_result = resolve_stage2_source_checkpoint(stage1_path, stage2_path, "densenet121")
     assert stage1_result.path == stage1_path.resolve()
     assert stage1_result.model.name == "model"
+    assert stage1_result.optimizer_iterations >= 0
 
 
 def test_stage2_checkpoint_path_uses_canonical_runtime_location(tmp_path, monkeypatch):

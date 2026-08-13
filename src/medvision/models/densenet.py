@@ -106,7 +106,7 @@ def unfreeze_densenet_for_finetuning(
                 if isinstance(layer, layers.BatchNormalization):
                     layer.trainable = False
 
-    if learning_rate is not None and hasattr(model, "optimizer") and model.optimizer is not None:
+    if learning_rate is not None:
         from medvision.utils.metrics import get_model_metrics
         optimizer = keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
         loss_fn = keras.losses.BinaryCrossentropy()

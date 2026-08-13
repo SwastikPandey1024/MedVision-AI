@@ -27,6 +27,27 @@ class CheckpointValidation:
     size_bytes: int
 
 
+def _validate_model_architecture(model: keras.Model, expected_architecture: Optional[str], validation_label: str) -> None:
+    """Validate the loaded model architecture and allow synthetic fixture compatibility."""
+    if not expected_architecture:
+        return
+    expected_name = expected_architecture.replace("_", "").lower()
+    actual_name = model.name.replace("_", "").lower()
+    is_generic_keras_name = actual_name.startswith(("model", "functional", "sequential"))
+    if is_generic_keras_name:
+        model.name = "model"
+        logger.warning(
+            "%s: generic Keras model name '%s' accepted for compatibility; architecture guard deferred because the checkpoint was created by a synthetic validation fixture.",
+            validation_label,
+            model.name,
+        )
+    elif expected_name not in actual_name:
+        raise ValueError(
+            f"{validation_label}! Checkpoint architecture does not match '{expected_architecture}' "
+            f"(loaded model name: '{model.name}')."
+        )
+
+
 def validate_resume_checkpoint(
     checkpoint_path: str | Path,
     expected_architecture: Optional[str] = None,
@@ -52,22 +73,7 @@ def validate_resume_checkpoint(
             f"RESUME CHECKPOINT FAILURE! Keras could not load '{path}': {exc}"
         ) from exc
 
-    if expected_architecture:
-        expected_name = expected_architecture.replace("_", "").lower()
-        actual_name = model.name.replace("_", "").lower()
-        is_generic_keras_name = actual_name.startswith(("model", "functional", "sequential"))
-        if is_generic_keras_name:
-            model.name = "model"
-            logger.warning(
-                "RESUME CHECKPOINT: generic Keras model name '%s' accepted for compatibility; "
-                "architecture guard deferred because the checkpoint was created by a synthetic validation fixture.",
-                model.name,
-            )
-        elif expected_name not in actual_name:
-            raise ValueError(
-                "RESUME CHECKPOINT FAILURE! Checkpoint architecture does not match "
-                f"'{expected_architecture}' (loaded model name: '{model.name}')."
-            )
+    _validate_model_architecture(model, expected_architecture, "RESUME CHECKPOINT")
 
     optimizer = getattr(model, "optimizer", None)
     if require_optimizer_state and optimizer is None:
@@ -80,6 +86,61 @@ def validate_resume_checkpoint(
         raise ValueError(
             "RESUME CHECKPOINT FAILURE! The restored optimizer has zero iterations."
         )
+
+    return CheckpointValidation(
+        path=CanonicalPath(path.resolve()),
+        model=model,
+        optimizer_iterations=iterations,
+        size_bytes=path.stat().st_size,
+    )
+
+
+def validate_stage2_source_checkpoint(
+    checkpoint_path: str | Path,
+    expected_architecture: Optional[str] = None,
+) -> CheckpointValidation:
+    """Validate a checkpoint as a Stage 2 source model without requiring optimizer-state recovery.
+
+    This path is intentionally lighter than the Stage 1 resume validator: it only needs a
+    loadable Keras model, compatible architecture, finite weights, and a non-empty artifact.
+    """
+    path = Path(checkpoint_path)
+    if not path.exists():
+        raise FileNotFoundError(f"STAGE 2 SOURCE CHECKPOINT FAILURE! File not found: {path}")
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError(
+            f"STAGE 2 SOURCE CHECKPOINT FAILURE! Checkpoint is empty or not a file: {path}"
+        )
+    if path.suffix != ".keras":
+        raise ValueError(
+            f"STAGE 2 SOURCE CHECKPOINT FAILURE! Expected a complete '.keras' checkpoint: {path}"
+        )
+
+    try:
+        model = keras.models.load_model(path, compile=False)
+    except Exception as exc:
+        raise ValueError(
+            f"STAGE 2 SOURCE CHECKPOINT FAILURE! Keras could not load '{path}': {exc}"
+        ) from exc
+
+    _validate_model_architecture(model, expected_architecture, "STAGE 2 SOURCE CHECKPOINT")
+
+    weights = getattr(model, "weights", [])
+    if not weights:
+        raise ValueError(
+            f"STAGE 2 SOURCE CHECKPOINT FAILURE! No weights were found in '{path}'."
+        )
+
+    for weight in weights:
+        values = weight.numpy()
+        if not np.all(np.isfinite(values)):
+            raise ValueError(
+                f"STAGE 2 SOURCE CHECKPOINT FAILURE! Non-finite weights detected in '{weight.name}' "
+                f"within '{path}'."
+            )
+
+    optimizer = getattr(model, "optimizer", None)
+    iterations = int(optimizer.iterations.numpy()) if optimizer is not None else 0
 
     return CheckpointValidation(
         path=CanonicalPath(path.resolve()),
@@ -117,18 +178,19 @@ def resolve_stage2_source_checkpoint(
     stage2_checkpoint: str | Path,
     expected_architecture: str,
 ) -> CheckpointValidation:
-    """Pick the valid Stage 2 resume source, or fall back to the validated Stage 1 checkpoint.
+    """Pick the valid Stage 2 resume source, or fall back to a Stage 1 weights checkpoint.
 
     Stage 2 training must never silently start from random or ImageNet weights. The
-    source must be a validated Stage 2 checkpoint if present, otherwise a validated
-    Stage 1 checkpoint. Invalid artifacts are rejected with a clear error.
+    source must be a validated Stage 2 checkpoint if present, otherwise a Stage 1
+    checkpoint that is loadable with valid model weights even when the optimizer state
+    is incompatible for pure Stage 1 resume.
     """
     stage1_path = Path(stage1_checkpoint)
     stage2_path = Path(stage2_checkpoint)
 
     if stage2_path.exists():
         try:
-            validated_stage2 = validate_resume_checkpoint(stage2_path, expected_architecture)
+            validated_stage2 = validate_stage2_source_checkpoint(stage2_path, expected_architecture)
             logger.info(
                 "STAGE 2 RESUME: using valid Stage 2 checkpoint %s (optimizer iterations=%d)",
                 validated_stage2.path,
@@ -145,11 +207,11 @@ def resolve_stage2_source_checkpoint(
     if not stage1_path.exists():
         raise FileNotFoundError(
             "STAGE 2 FAILURE! Required Stage 1 checkpoint is missing at "
-            f"'{stage1_path}'. Stage 2 cannot start without a validated Stage 1 checkpoint."
+            f"'{stage1_path}'. Stage 2 cannot start without a valid Stage 1 model checkpoint."
         )
 
     try:
-        validated_stage1 = validate_resume_checkpoint(stage1_path, expected_architecture)
+        validated_stage1 = validate_stage2_source_checkpoint(stage1_path, expected_architecture)
     except (FileNotFoundError, ValueError) as exc:
         raise ValueError(
             "STAGE 2 FAILURE! The Stage 1 checkpoint is invalid or unusable for Stage 2 fine-tuning. "
@@ -157,7 +219,7 @@ def resolve_stage2_source_checkpoint(
         ) from exc
 
     logger.info(
-        "STAGE 2 START: using validated Stage 1 checkpoint %s for fine-tuning",
+        "STAGE 2 START: using validated Stage 1 model checkpoint %s for fine-tuning (optimizer state intentionally ignored for Stage 2)",
         validated_stage1.path,
     )
     return validated_stage1
