@@ -1,7 +1,15 @@
 """Pytest shared fixtures and setup configuration."""
 
 import pytest
-from medvision.config.settings import load_config
+from pathlib import Path
+
+from medvision.config.settings import CanonicalPath, load_config
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory):
+    """Return test-file paths using the canonical slash-style formatting required by runtime artifacts."""
+    return CanonicalPath(tmp_path_factory.mktemp("tmp_path"))
 
 
 @pytest.fixture

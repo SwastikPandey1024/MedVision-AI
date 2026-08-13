@@ -6,6 +6,28 @@ from typing import Any, Dict
 import yaml
 
 
+class CanonicalPath(type(Path())):
+    """Path subclass whose string form uses plain forward slashes for artifact paths."""
+
+    def __new__(cls, *args, **kwargs):
+        return super().__new__(cls, *args, **kwargs)
+
+    def __str__(self) -> str:
+        return super().__str__().replace("\\", "/")
+
+    def __fspath__(self) -> str:
+        return str(self)
+
+    def __truediv__(self, key):
+        return type(self)(super().__truediv__(key))
+
+    def __rtruediv__(self, key):
+        return type(self)(super().__rtruediv__(key))
+
+    def resolve(self, *args, **kwargs):
+        return type(self)(super().resolve(*args, **kwargs))
+
+
 def get_project_root() -> Path:
     """Return the absolute path to the project root directory."""
     return Path(__file__).resolve().parent.parent.parent.parent
@@ -52,11 +74,11 @@ def get_output_base_dir() -> Path:
     """
     env_dir = os.environ.get("MEDVISION_OUTPUT_DIR")
     if env_dir:
-        base_path = Path(env_dir)
+        base_path = CanonicalPath(env_dir)
     elif os.path.exists("/kaggle/working"):
-        base_path = Path("/kaggle/working/medvision_outputs")
+        base_path = CanonicalPath("/kaggle/working/medvision_outputs")
     else:
-        base_path = get_project_root().parent / "medvision_outputs"
+        base_path = CanonicalPath(get_project_root().parent / "medvision_outputs")
     return base_path
 
 

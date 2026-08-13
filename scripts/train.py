@@ -105,9 +105,10 @@ def parse_args():
             "exp_c",
             "stage1",
             "stage2",
+            "stage2_fit",
             "all",
         ],
-        help="Training stage: 'diagnostic', 'preflight_only', 'clean_fit_only', 'forensic', 'exp_k1', 'exp_k2', 'exp_k3', 'stage1', etc.",
+        help="Training stage: 'diagnostic', 'preflight_only', 'clean_fit_only', 'forensic', 'exp_k1', 'exp_k2', 'exp_k3', 'stage1', 'stage2', etc.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -370,6 +371,26 @@ def main():
         logger.info("STAGE 1 TRAINING COMPLETED SUCCESSFULLY.")
         return
 
+    if args.stage == "stage2":
+        logger.info("=" * 75)
+        logger.info("STAGE 2 FINE-TUNING: DEDICATED EXECUTION FRAMEWORK")
+        logger.info("  PROCESS 1: Preflight Diagnostic & 10-Batch Benchmark Subprocess")
+        logger.info("  PROCESS 2: Stage 2 fine-tuning subprocess starting from validated Stage 1 checkpoint")
+        logger.info("=" * 75)
+
+        p1_ok = run_isolated_subprocess(args, stage="preflight_only")
+        if not p1_ok:
+            logger.error("STAGE 2 ABORTED: Preflight subprocess failed.")
+            sys.exit(1)
+
+        p2_ok = run_isolated_subprocess(args, stage="stage2_fit")
+        if not p2_ok:
+            logger.error("STAGE 2 ABORTED: Stage 2 training subprocess failed.")
+            sys.exit(1)
+
+        logger.info("STAGE 2 TRAINING COMPLETED SUCCESSFULLY.")
+        return
+
     config = load_config()
 
     # Hardware Strategy Setup
@@ -627,6 +648,55 @@ def main():
             initial_epoch=args.resume_epoch,
             resume_architecture=args.architecture,
         )
+        return
+
+    if args.stage == "stage2_fit":
+        logger.info("=" * 75)
+        logger.info("STAGE 2 FIT ONLY (Clean, standalone fine-tuning from validated Stage 1 checkpoint)")
+        logger.info("=" * 75)
+
+        if args.mode != "full":
+            raise ValueError("STAGE 2 can only run in --mode full and requires the Kaggle GPU dataset runtime.")
+
+        stage1_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage1_best.keras")
+        stage2_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage2_best.keras")
+        stage2_source = resolve_stage2_source_checkpoint(stage1_ckpt_path, stage2_ckpt_path, args.architecture)
+
+        if Path(stage2_ckpt_path).exists() and Path(stage2_ckpt_path).resolve() == stage2_source.path:
+            logger.info("STAGE 2 RESUME: resuming from valid Stage 2 checkpoint %s", stage2_source.path)
+            model = stage2_source.model
+            resume_from = stage2_ckpt_path
+            initial_epoch_arg = args.resume_epoch
+            stage2_model = model
+        else:
+            logger.info("STAGE 2 START: loading validated Stage 1 checkpoint %s and unfreezing top 20 layers", stage2_source.path)
+            model = stage2_source.model
+            stage2_model = unfreeze_densenet_for_finetuning(model, unfreeze_layers=20, learning_rate=1e-5)
+            resume_from = None
+            initial_epoch_arg = None
+
+        trainable_bn_layers = sum(
+            1 for layer in stage2_model.layers if isinstance(layer, keras.layers.BatchNormalization) and layer.trainable
+        )
+        if trainable_bn_layers != 0:
+            raise ValueError(f"STAGE 2 SAFETY VIOLATION! Found {trainable_bn_layers} trainable BatchNorm layers.")
+
+        history_s2 = train_model(
+            model=stage2_model,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            epochs=args.epochs,
+            steps_per_epoch=expected_train_steps,
+            validation_steps=expected_val_steps,
+            class_weights=class_weights,
+            checkpoint_filepath=stage2_ckpt_path,
+            experiment_name=f"{args.architecture}_stage2_{args.mode}",
+            config=config,
+            resume_from=resume_from,
+            initial_epoch=initial_epoch_arg,
+            resume_architecture=args.architecture,
+        )
+        verify_checkpoint_persistence(stage2_ckpt_path)
         return
 
     if args.stage in ["diagnostic", "preflight_only", "stage1_diagnostic"]:

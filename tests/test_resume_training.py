@@ -6,9 +6,12 @@ import numpy as np
 import tensorflow as tf
 import keras
 
+from medvision.config.settings import get_output_dir
+from medvision.models.densenet import unfreeze_densenet_for_finetuning
 from medvision.models.trainer import (
     find_valid_resume_checkpoint,
     get_resume_monitor_baseline,
+    resolve_stage2_source_checkpoint,
     train_model,
     validate_resume_checkpoint,
     verify_checkpoint_persistence,
@@ -160,3 +163,48 @@ def test_normal_non_resume_training_unchanged(tmp_path):
     assert len(history.epoch) == 1
     assert history.epoch[0] == 0
     assert verify_checkpoint_persistence(out_ckpt) is True
+
+
+def test_stage2_checkpoint_resolution_prefers_valid_stage2_then_stage1(tmp_path):
+    """Stage 2 must resume an existing valid stage2 checkpoint or fall back to the validated stage1 checkpoint."""
+    stage1_path = tmp_path / "densenet121_stage1_best.keras"
+    stage2_path = tmp_path / "densenet121_stage2_best.keras"
+    build_and_save_dummy_model(str(stage1_path))
+    build_and_save_dummy_model(str(stage2_path))
+
+    stage2_result = resolve_stage2_source_checkpoint(stage1_path, stage2_path, "densenet121")
+    assert stage2_result.path == stage2_path.resolve()
+    assert stage2_result.optimizer_iterations > 0
+
+    stage2_path.unlink()
+    stage1_result = resolve_stage2_source_checkpoint(stage1_path, stage2_path, "densenet121")
+    assert stage1_result.path == stage1_path.resolve()
+    assert stage1_result.model.name == "model"
+
+
+def test_stage2_checkpoint_path_uses_canonical_runtime_location(tmp_path, monkeypatch):
+    """Stage 2 checkpoint must be stored under the canonical runtime artifacts folder."""
+    test_out = tmp_path / "medvision_outputs"
+    monkeypatch.setenv("MEDVISION_OUTPUT_DIR", str(test_out))
+
+    stage2_path = get_output_dir("checkpoints") / "densenet121_stage2_best.keras"
+    assert stage2_path.parent.name == "checkpoints"
+    assert stage2_path.name == "densenet121_stage2_best.keras"
+    assert str(stage2_path).endswith("medvision_outputs/checkpoints/densenet121_stage2_best.keras")
+
+
+def test_stage2_unfreeze_top_20_layers_and_freezes_batchnorm(tmp_path):
+    """Stage 2 fine-tuning must unfreeze the top 20 backbone layers while leaving all BatchNorm layers frozen."""
+    model = build_and_save_dummy_model(str(tmp_path / "stage1_model.keras"))
+    model = unfreeze_densenet_for_finetuning(model, unfreeze_layers=20, learning_rate=1e-5)
+
+    trainable_bn = sum(
+        1
+        for layer in model.layers
+        if hasattr(layer, "trainable") and layer.__class__.__name__ == "BatchNormalization" and layer.trainable
+    )
+    assert trainable_bn == 0
+
+    if hasattr(model, "optimizer") and model.optimizer is not None:
+        assert float(model.optimizer.learning_rate) == pytest.approx(1e-5)
+        assert float(model.optimizer.clipnorm) == pytest.approx(1.0)
