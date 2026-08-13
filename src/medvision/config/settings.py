@@ -42,3 +42,27 @@ def load_config(config_path: str | None = None) -> Dict[str, Any]:
         raise ValueError(f"Invalid architecture: '{arch}'. Must be one of {valid_archs}.")
 
     return config
+
+
+def get_output_base_dir() -> Path:
+    """Return the absolute output directory path for training artifacts outside Git repo.
+
+    Defaults to `/kaggle/working/medvision_outputs` if running on Kaggle or if MEDVISION_OUTPUT_DIR env var is set.
+    """
+    env_dir = os.environ.get("MEDVISION_OUTPUT_DIR")
+    if env_dir:
+        base_path = Path(env_dir)
+    elif os.path.exists("/kaggle/working"):
+        base_path = Path("/kaggle/working/medvision_outputs")
+    else:
+        base_path = Path("/kaggle/working/medvision_outputs")
+    return base_path
+
+
+def get_output_dir(subfolder: str = "") -> Path:
+    """Return and automatically create a specific output subfolder (checkpoints, logs, metrics)."""
+    base = get_output_base_dir()
+    dir_path = base / subfolder if subfolder else base
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+

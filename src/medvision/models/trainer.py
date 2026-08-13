@@ -9,10 +9,47 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from medvision.config.settings import get_project_root
+from medvision.config.settings import get_project_root, get_output_dir
 from medvision.utils.logger import get_logger
 
 logger = get_logger("medvision.models.trainer")
+
+
+def verify_checkpoint_persistence(checkpoint_path: str) -> bool:
+    """Verify that a trained model checkpoint exists and has non-zero size.
+
+    Raises:
+        RuntimeError: If checkpoint file does not exist or has 0 bytes size.
+    """
+    p = Path(checkpoint_path)
+    if not p.exists():
+        err_msg = (
+            f"CHECKPOINT PERSISTENCE FAILURE! Model checkpoint file does not exist at: {checkpoint_path}\n"
+            f"Training cannot be considered successful."
+        )
+        logger.error(err_msg)
+        raise RuntimeError(err_msg)
+
+    size_bytes = p.stat().st_size
+    if size_bytes == 0:
+        err_msg = (
+            f"CHECKPOINT PERSISTENCE FAILURE! Model checkpoint at {checkpoint_path} has 0 bytes (empty file)!\n"
+            f"Training cannot be considered successful."
+        )
+        logger.error(err_msg)
+        raise RuntimeError(err_msg)
+
+    size_mb = size_bytes / (1024 * 1024)
+    print("\n" + "=" * 75)
+    print("CHECKPOINT PERSISTENCE: PASS")
+    print(f"CHECKPOINT PATH: {p.resolve()}")
+    print(f"CHECKPOINT SIZE MB: {size_mb:.2f} MB")
+    print("=" * 75 + "\n")
+    logger.info(
+        f"CHECKPOINT PERSISTENCE: PASS | PATH: {p.resolve()} | SIZE: {size_mb:.2f} MB"
+    )
+    return True
+
 
 
 class NaNGuardCallback(keras.callbacks.Callback):
@@ -118,8 +155,9 @@ class BatchLossTrackerCallback(keras.callbacks.Callback):
     Identifies the EXACT first batch and internal state tensor that becomes non-finite during model.fit().
     """
 
-    def __init__(self, verbose: bool = True):
+    def __init__(self, steps_per_epoch: Optional[int] = None, verbose: bool = True):
         super().__init__()
+        self.steps_per_epoch = steps_per_epoch
         self.verbose = verbose
         self.history_records: List[Dict[str, Any]] = []
         self.first_bad_batch: Optional[Dict[str, Any]] = None
@@ -265,8 +303,15 @@ class BatchLossTrackerCallback(keras.callbacks.Callback):
         if self.verbose:
             ls_str = f" | loss_scale={loss_scale_val}" if loss_scale_val is not None else ""
             loss_str = f"{loss_val:.4f}" if loss_finite else str(loss_val)
+
+            total_steps = self.steps_per_epoch
+            if total_steps is None and hasattr(self, "params") and isinstance(self.params, dict):
+                total_steps = self.params.get("steps")
+
+            steps_str = f"/{total_steps}" if total_steps is not None else ""
+
             logger.info(
-                f"[FORENSIC K-FIT BATCH {b_idx:02d}/10] loss={loss_str} | weights_finite={weights_finite} | "
+                f"[BATCH {b_idx:02d}{steps_str}] loss={loss_str} | weights_finite={weights_finite} | "
                 f"opt_vars_finite={opt_vars_finite}{ls_str} | metrics_clean={len(non_finite_log_keys)==0}"
             )
 
@@ -280,7 +325,10 @@ class BatchLossTrackerCallback(keras.callbacks.Callback):
                 if val_loss_val is not None and math.isfinite(float(val_loss_val))
                 else str(val_loss_val)
             )
-            logger.info(f"[FORENSIC VAL BATCH {v_idx:02d}/03] val_loss={v_str}")
+            total_v_steps = self.params.get("steps") if hasattr(self, "params") and isinstance(self.params, dict) else None
+            v_steps_str = f"/{total_v_steps}" if total_v_steps is not None else ""
+            logger.info(f"[VAL BATCH {v_idx:02d}{v_steps_str}] val_loss={v_str}")
+
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
         logs = logs or {}
@@ -826,12 +874,12 @@ def train_model(
 
     if checkpoint_filepath is None:
         checkpoint_filepath = str(
-            root / "models" / "checkpoints" / f"{experiment_name}_best.keras"
+            get_output_dir("checkpoints") / f"{experiment_name}_best.keras"
         )
 
-    tensorboard_dir = str(root / "artifacts" / "tensorboard" / experiment_name)
+    tensorboard_dir = str(get_output_dir("logs") / "tensorboard" / experiment_name)
     csv_log_path = str(
-        root / "artifacts" / "experiments" / f"{experiment_name}_history.csv"
+        get_output_dir("metrics") / f"{experiment_name}_history.csv"
     )
 
     patience_es = 5
@@ -868,6 +916,9 @@ def train_model(
         callbacks=callbacks,
         verbose=1,
     )
+
+    # Verify Checkpoint Persistence (Requirements 3, 4, 5)
+    verify_checkpoint_persistence(checkpoint_filepath)
 
     logger.info("Model training completed successfully.")
     return history

@@ -29,7 +29,7 @@ import numpy as np
 import tensorflow as tf
 import keras
 
-from medvision.config.settings import load_config, get_project_root
+from medvision.config.settings import load_config, get_project_root, get_output_dir
 from medvision.data.dataset import find_dataset_root, parse_rsna_manifest, create_real_rsna_dataset
 from medvision.data.splits import create_patient_aware_splits
 from medvision.data.local_dev_loader import load_dev_subset_datasets
@@ -43,6 +43,7 @@ from medvision.models.trainer import (
     inspect_10_batch_losses,
     build_callbacks,
     run_forensic_k_experiments,
+    verify_checkpoint_persistence,
 )
 from medvision.evaluation import (
     compute_classification_metrics,
@@ -506,10 +507,11 @@ def main():
         logger.info("=" * 75)
         logger.info("EXPERIMENT A: CLEAN BASELINE (FRESH MODEL + FRESH DATASET + model.fit ONLY)")
         logger.info("=" * 75)
+        exp_a_ckpt = str(get_output_dir("checkpoints") / "exp_a_best.keras")
         callbacks = build_callbacks(
-            checkpoint_filepath=str(root / "artifacts" / "experiments" / "exp_a_best.keras"),
-            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "exp_a"),
-            csv_log_path=str(root / "artifacts" / "experiments" / "exp_a_history.csv"),
+            checkpoint_filepath=exp_a_ckpt,
+            tensorboard_dir=str(get_output_dir("logs") / "tensorboard" / "exp_a"),
+            csv_log_path=str(get_output_dir("metrics") / "exp_a_history.csv"),
             monitor_metric="val_pr_auc",
             mode="max",
         )
@@ -524,6 +526,7 @@ def main():
                 callbacks=callbacks,
                 verbose=1,
             )
+        verify_checkpoint_persistence(exp_a_ckpt)
         loss_end = history.history["loss"][-1]
         val_loss_end = history.history["val_loss"][-1]
         logger.info("=" * 75)
@@ -537,10 +540,11 @@ def main():
         logger.info("=" * 75)
         logger.info("CLEAN FIT ONLY (PROCESS 2 OF EXP_C: CLEAN PROCESS BOUNDARY)")
         logger.info("=" * 75)
+        clean_fit_ckpt = str(get_output_dir("checkpoints") / "clean_fit_best.keras")
         callbacks = build_callbacks(
-            checkpoint_filepath=str(root / "artifacts" / "experiments" / "clean_fit_best.keras"),
-            tensorboard_dir=str(root / "artifacts" / "tensorboard" / "clean_fit"),
-            csv_log_path=str(root / "artifacts" / "experiments" / "clean_fit_history.csv"),
+            checkpoint_filepath=clean_fit_ckpt,
+            tensorboard_dir=str(get_output_dir("logs") / "tensorboard" / "clean_fit"),
+            csv_log_path=str(get_output_dir("metrics") / "clean_fit_history.csv"),
             monitor_metric="val_pr_auc",
             mode="max",
         )
@@ -555,6 +559,7 @@ def main():
                 callbacks=callbacks,
                 verbose=1,
             )
+        verify_checkpoint_persistence(clean_fit_ckpt)
         loss_end = history.history["loss"][-1]
         val_loss_end = history.history["val_loss"][-1]
         logger.info("=" * 75)
@@ -571,9 +576,12 @@ def main():
         logger.info("STAGE 1 FIT ONLY (PROCESS 2 OF STAGE 1: CLEAN PROCESS BOUNDARY)")
         logger.info("=" * 75)
         stage1_exp_name = f"{args.architecture}_stage1_{args.mode}"
-        stage1_ckpt_path = str(root / "artifacts" / "experiments" / f"{stage1_exp_name}_best.keras")
-        stage1_tb_dir = str(root / "artifacts" / "tensorboard" / stage1_exp_name)
-        stage1_csv_path = str(root / "artifacts" / "experiments" / f"{stage1_exp_name}_history.csv")
+        if args.architecture == "densenet121":
+            stage1_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage1_best.keras")
+        else:
+            stage1_ckpt_path = str(get_output_dir("checkpoints") / f"{stage1_exp_name}_best.keras")
+        stage1_tb_dir = str(get_output_dir("logs") / "tensorboard" / stage1_exp_name)
+        stage1_csv_path = str(get_output_dir("metrics") / f"{stage1_exp_name}_history.csv")
 
         callbacks = build_callbacks(
             checkpoint_filepath=stage1_ckpt_path,
@@ -591,6 +599,7 @@ def main():
             steps_per_epoch=expected_train_steps,
             validation_steps=expected_val_steps,
             class_weights=class_weights,
+            checkpoint_filepath=stage1_ckpt_path,
             callbacks=callbacks,
         )
         return
@@ -631,7 +640,10 @@ def main():
         return
 
     stage1_exp_name = f"{args.architecture}_stage1_{args.mode}"
-    stage1_ckpt_path = str(root / "artifacts" / "experiments" / f"{stage1_exp_name}_best.keras")
+    if args.architecture == "densenet121":
+        stage1_ckpt_path = str(get_output_dir("checkpoints") / "densenet121_stage1_best.keras")
+    else:
+        stage1_ckpt_path = str(get_output_dir("checkpoints") / f"{stage1_exp_name}_best.keras")
 
     s1_start_time = time.time()
     history_s1 = train_model(
@@ -714,7 +726,7 @@ def main():
     assert trainable_bn_layers == 0, f"CRITICAL SAFETY VIOLATION! Found {trainable_bn_layers} trainable BatchNorm layers!"
 
     stage2_exp_name = f"{args.architecture}_stage2_{args.mode}"
-    stage2_ckpt_path = str(root / "artifacts" / "experiments" / f"{stage2_exp_name}_best.keras")
+    stage2_ckpt_path = str(get_output_dir("checkpoints") / f"{stage2_exp_name}_best.keras")
 
     s2_start_time = time.time()
     history_s2 = train_model(
