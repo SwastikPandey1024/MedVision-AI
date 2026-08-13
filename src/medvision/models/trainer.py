@@ -841,9 +841,9 @@ def inspect_10_batch_losses(
 
 
 def train_model(
-    model: keras.Model,
-    train_ds: tf.data.Dataset,
-    val_ds: tf.data.Dataset,
+    model: Optional[keras.Model] = None,
+    train_ds: tf.data.Dataset = None,
+    val_ds: tf.data.Dataset = None,
     epochs: int = 15,
     steps_per_epoch: Optional[int] = None,
     validation_steps: Optional[int] = None,
@@ -852,26 +852,38 @@ def train_model(
     experiment_name: str = "exp_baseline_001",
     config: Optional[Dict[str, Any]] = None,
     callbacks: Optional[List[keras.callbacks.Callback]] = None,
+    resume_from: Optional[str] = None,
+    initial_epoch: int = 0,
 ) -> keras.callbacks.History:
     """Execute model training with callbacks, class weights, and explicit cardinality bounds.
 
-    Args:
-        model: Compiled Keras model instance.
-        train_ds: Training tf.data.Dataset.
-        val_ds: Validation tf.data.Dataset.
-        epochs: Maximum training epochs.
-        steps_per_epoch: Explicit steps per training epoch (REQUIRED for repeating datasets).
-        validation_steps: Explicit validation steps per epoch.
-        class_weights: Optional dictionary of class weights.
-        checkpoint_filepath: Optional custom model checkpoint path.
-        experiment_name: Identifier for experiment tracking.
-        config: Master configuration dictionary.
-        callbacks: Optional pre-constructed list of Keras Callback objects.
-
-    Returns:
-        Keras History object.
+    Supports resuming training from an existing model checkpoint (.keras file).
     """
     root = get_project_root()
+
+    if resume_from is not None:
+        if not os.path.exists(resume_from):
+            err_msg = f"RESUME CHECKPOINT FAILURE! Resume checkpoint file not found at: {resume_from}"
+            logger.error(err_msg)
+            raise FileNotFoundError(err_msg)
+
+        logger.info(f"Loading existing model checkpoint from: {resume_from}")
+        model = keras.models.load_model(resume_from, safe_mode=False)
+
+        if initial_epoch == 0:
+            initial_epoch = 1
+
+        print("\n" + "=" * 75)
+        print(f"RESUME CHECKPOINT: {Path(resume_from).resolve()}")
+        print(f"RESUME EPOCH     : {initial_epoch}")
+        print(f"TARGET EPOCHS    : {epochs}")
+        print("=" * 75 + "\n")
+        logger.info(
+            f"RESUME CHECKPOINT: {resume_from} | RESUME EPOCH: {initial_epoch} | TARGET EPOCHS: {epochs}"
+        )
+
+    if model is None:
+        raise ValueError("train_model requires a valid model instance or a valid resume_from checkpoint path.")
 
     if checkpoint_filepath is None:
         checkpoint_filepath = str(
@@ -898,10 +910,11 @@ def train_model(
             mode="max",
             early_stopping_patience=patience_es,
             reduce_lr_patience=patience_lr,
+            append_csv=(resume_from is not None or initial_epoch > 0),
         )
 
     logger.info(
-        f"Starting model training for {epochs} epochs on experiment '{experiment_name}'..."
+        f"Starting model training for {epochs} epochs (initial_epoch={initial_epoch}) on experiment '{experiment_name}'..."
     )
     logger.info(f"Checkpoint destination  : {checkpoint_filepath}")
     logger.info(f"Configured steps_per_epoch : {steps_per_epoch}")
@@ -911,6 +924,7 @@ def train_model(
         train_ds,
         validation_data=val_ds,
         epochs=epochs,
+        initial_epoch=initial_epoch,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
         class_weight=class_weights,
