@@ -358,6 +358,7 @@ def build_callbacks(
     mode: str = "max",
     early_stopping_patience: int = 5,
     reduce_lr_patience: int = 3,
+    append_csv: bool = False,
 ) -> list:
     """Construct full suite of Keras training callbacks including NaN guards."""
     os.makedirs(os.path.dirname(checkpoint_filepath), exist_ok=True)
@@ -396,7 +397,7 @@ def build_callbacks(
         # CSV log output
         keras.callbacks.CSVLogger(
             filename=csv_log_path,
-            append=True,
+            append=append_csv,
         ),
         # TensorBoard output
         keras.callbacks.TensorBoard(
