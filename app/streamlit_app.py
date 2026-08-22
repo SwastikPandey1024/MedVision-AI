@@ -3,11 +3,11 @@
 import sys
 from pathlib import Path
 
-# Ensure src/ and app/ are in sys.path
+# Ensure ROOT_DIR and src/ are in sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = str(ROOT_DIR / "src")
 APP_DIR = str(ROOT_DIR / "app")
-for p in [SRC_DIR, APP_DIR]:
+for p in [str(ROOT_DIR), SRC_DIR, APP_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -15,10 +15,17 @@ import streamlit as st
 import numpy as np
 from PIL import Image
 
-from app.components.header import render_header
-from app.components.disclaimer import render_disclaimer
-from app.components.metrics_card import render_performance_summary
-from app.services.inference_service import get_cached_model, process_uploaded_image
+try:
+    from app.components.header import render_header
+    from app.components.disclaimer import render_disclaimer
+    from app.components.metrics_card import render_performance_summary
+    from app.services.inference_service import get_cached_model, process_uploaded_image
+except ImportError:
+    from components.header import render_header
+    from components.disclaimer import render_disclaimer
+    from components.metrics_card import render_performance_summary
+    from services.inference_service import get_cached_model, process_uploaded_image
+
 from medvision.explainability.gradcam import generate_gradcam_explanation
 
 
