@@ -51,6 +51,7 @@ data/metadata/*
 *.tar
 *.gz
 *.csv
+*.lnk
 
 # ML Framework Models & Checkpoints
 models/checkpoints/*
