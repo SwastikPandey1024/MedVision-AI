@@ -1,0 +1,33 @@
+# Git and IDE
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+
+# Python Virtual Environments and Caches
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Large Datasets & Archives
+data/raw/
+data/processed/
+*.zip
+*.tar
+*.tar.gz
+*.tfrecord
+
+# Temporary & Local Scratch
+scratch/
+artifacts/temp/
+.env
+.env.*

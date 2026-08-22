@@ -3,10 +3,13 @@
 [![Python Version](https://img.shields.io/badge/Python-3.11-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Deep Learning Framework](https://img.shields.io/badge/TensorFlow-2.16%2B%20%7C%20Keras%203-FF6F00.svg?logo=tensorflow&logoColor=white)](https://tensorflow.org)
 [![Dataset: RSNA](https://img.shields.io/badge/Dataset-RSNA%20Pneumonia%20(26.6k)-blue.svg)](https://www.kaggle.com/c/rsna-pneumonia-detection-challenge)
-[![Tests Passing](https://img.shields.io/badge/Tests-74%2F74%20Passing-brightgreen.svg?logo=pytest&logoColor=white)](#-automated-testing--reproducibility)
+[![Tests Passing](https://img.shields.io/badge/Tests-92%2F92%20Passing-brightgreen.svg?logo=pytest&logoColor=white)](#-automated-testing--reproducibility)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg?logo=fastapi&logoColor=white)](api/main.py)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.40%2B-FF4B4B.svg?logo=streamlit&logoColor=white)](app/streamlit_app.py)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)](Dockerfile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An enterprise-grade, leakage-free deep learning system for pneumonia detection from frontal chest radiographs. Built with **DenseNet121** transfer learning, multi-GPU mixed-precision training, numerical stability forensics, and validation-isolated decision threshold optimization.
+An enterprise-grade, leakage-free deep learning system for pneumonia detection from frontal chest radiographs. Built with **DenseNet121** transfer learning, multi-GPU mixed-precision training, numerical stability forensics, validation-isolated decision threshold optimization, **Grad-CAM** visual interpretability, **FastAPI** asynchronous serving, and an interactive **Streamlit** diagnostic dashboard.
 
 > [!CAUTION]
 > **Non-Clinical Research & Education Disclaimer**: MedVision-AI is an academic machine learning research and educational demonstration tool. It is **not** a certified medical device (FDA/EMA) and must **never** be used for clinical diagnosis, patient screening, or medical decision-making. See [`docs/disclaimer.md`](docs/disclaimer.md).
@@ -34,10 +37,16 @@ Evaluated on the **official held-out test split of 4,003 unique patients (0.0% p
 - 📖 **[Portfolio Project Page](docs/portfolio.md)** — Comprehensive case study and technical narrative.
 - 🏗️ **[System Architecture](docs/architecture.md)** — Detailed Mermaid diagram and subsystem breakdown.
 - 📊 **[Final Metrics Table](docs/final_metrics.md)** — Complete split-by-split validation and test performance breakdown.
-- 🔄 **[Reproducibility Guide](docs/reproducibility.md)** — Exact environment configuration, Kaggle training, and CLI execution.
-- 📄 **[Resume Project Bullets](docs/resume_bullets.md)** — ATS-friendly, technical, and one-line resume bullets.
+- 🔬 **[Grad-CAM Saliency Engine](docs/phase8_gradcam.md)** — Mathematical foundation and explainability guide.
+- 🌐 **[FastAPI REST Service](docs/phase9_api.md)** — OpenAPI endpoint specifications and schema documentation.
+- 🩺 **[Streamlit Radiograph UI](docs/phase10_streamlit.md)** — Interactive dashboard operation and layout guide.
+- 🐳 **[Docker & Cloud Deployment](docs/phase11_deployment.md)** — Container build and cloud-readiness recipes.
+- 🧪 **[Integration & Load Test Report](docs/phase12_integration_loadtest.md)** — Measured concurrency and latency benchmarks.
+- 🎙️ **[Interview Demo Scripts](docs/portfolio/demo_script.md)** — 30-second, 2-minute, and 5-minute technical narratives.
+- 🔄 **[Reproducibility Guide](docs/reproducibility.md)** — Environment configuration, GPU training, and CLI execution.
+- 📄 **[Resume Project Bullets](docs/resume_bullets.md)** — ATS-friendly and technical resume bullets.
 - 💼 **[LinkedIn Descriptions](docs/linkedin_description.md)** — Recruiter-friendly posts and project descriptions.
-- 🖼️ **[Demo & Screenshot Catalog](docs/demo_assets.md)** — Screenshot capture plan and visual asset inventory.
+- 🖼️ **[Screenshot Catalog](docs/screenshot_gallery.md)** — Portfolio screenshot gallery and capture specifications.
 - ⚠️ **[Non-Clinical Disclaimer](docs/disclaimer.md)** — Full regulatory and medical scope disclaimer.
 
 ---
@@ -48,13 +57,13 @@ Pneumonia accounts for over 2.5 million deaths annually worldwide. While chest r
 
 Developing reliable machine learning models for chest X-rays requires overcoming critical engineering challenges:
 1. **Patient Memorization (Data Leakage):** Hospital datasets frequently contain multiple radiographs per patient. Splitting datasets at the image level causes models to memorize patient ribcage geometry rather than pathology, creating misleadingly high benchmark numbers.
-2. **Class Imbalance:** Pneumonia is typically present in 20–25% of screening images (22.5% in RSNA), making raw accuracy deceptive and requiring PR-AUC and ROC-AUC as primary metrics.
+2. **Class Imbalance:** Pneumonia is present in 22.5% of screening images in the RSNA cohort, making raw accuracy deceptive and requiring PR-AUC and ROC-AUC as primary metrics.
 3. **Fine-Tuning Instability:** Fine-tuning deep backbones with small batches often corrupts pre-trained Batch Normalization running statistics, destabilizing loss convergence.
 4. **Threshold Snooping:** Tuning classification thresholds directly on test data leads to severe overfitting and inflated claims.
 
 ---
 
-## 🏗️ System Architecture & Data Engineering
+## 🏗️ System Architecture & Engineering Flow
 
 ```
 RSNA Dataset (26,684 CXRs)
@@ -84,31 +93,97 @@ Numerical Forensic Analysis (FP32 vs. mixed_float16 Stability Profiling)
 Zero-Leakage Evaluation Pipeline:
     ├─── Validation Split Inference & 81-Point Threshold Search (t=0.60 selected)
     └─── Frozen Threshold (t=0.60) Applied to 4,003-Patient Test Split
+    │
+    ▼
+Production Deployment & Interpretability:
+    ├─── Grad-CAM Visual Saliency Engine (conv5_block16_2_conv)
+    ├─── FastAPI Asynchronous REST Service (Port 8000)
+    ├─── Streamlit Interactive Dashboard (Port 8501)
+    └─── Production Docker Containerization (Python 3.11-slim, non-root)
 ```
 
 ### 1. Patient-Aware Group Splitting (0% Leakage)
-Patients are partitioned strictly by `patient_id` using target-stratified group k-fold splitting:
 - **Train Set (70%):** `18,678` unique patients
 - **Validation Set (15%):** `4,003` unique patients
 - **Held-Out Test Set (15%):** `4,003` unique patients
 - **Leakage Verification:** Automated audit confirms **`0.0%` patient intersection** across all partitions.
 
-### 2. Two-Stage Transfer Learning & BatchNorm Policy
+### 2. Two-Stage Transfer Learning & BatchNorm Protection
 - **Backbone:** DenseNet121 (7,301,185 parameters) pre-trained on ImageNet.
-- **Custom Classification Head:** Global Average Pooling $\to$ Batch Normalization $\to$ Dropout ($p=0.4$) $\to$ Dense (128 units, ReLU) $\to$ Dropout ($p=0.2$) $\to$ Dense (1 unit, Sigmoid).
-- **Stage 1 (Feature Extraction):** Backbone frozen; classification head trained for 5 epochs with Adam ($LR = 10^{-4}$, gradient clipnorm = 1.0) on 2 × Tesla T4 GPUs with `mixed_float16`.
-- **Stage 2 (Fine-Tuning):** Top 20 convolutional layers unfrozen with low learning rate ($LR = 10^{-5}$). **Critical BatchNorm Policy:** All Batch Normalization layers were strictly locked (`trainable = False`) to prevent small-batch noise from corrupting pre-trained channel statistics.
+- **Classification Head:** Global Average Pooling $\to$ Batch Normalization $\to$ Dropout ($p=0.4$) $\to$ Dense (128 units, ReLU) $\to$ Dropout ($p=0.2$) $\to$ Dense (1 unit, Sigmoid).
+- **Stage 1 (Feature Extraction):** Backbone frozen; classification head trained for 5 epochs with Adam ($LR = 10^{-4}$) on 2 × Tesla T4 GPUs with `mixed_float16`.
+- **Stage 2 (Fine-Tuning):** Top 20 convolutional layers unfrozen ($LR = 10^{-5}$). **Critical BatchNorm Policy:** All Batch Normalization layers were strictly locked (`trainable = False`) to prevent small-batch noise from corrupting pre-trained channel statistics.
 
-### 3. Numerical Forensics & Precision Profiling
-Pre-flight and post-training forensic diagnostics verified:
-- Zero NaN/Inf gradients or exploding loss events.
-- Exact convergence equivalence between 32-bit floating point (FP32) and 16-bit mixed precision (`mixed_float16`).
-- Zero trainable Batch Normalization parameters during Stage 2 fine-tuning.
-
-### 4. Zero-Leakage Decision Threshold Optimization
-- Threshold search evaluated 81 candidate thresholds from $0.10$ to $0.90$ ($\Delta t = 0.01$) **exclusively on validation predictions**.
+### 3. Zero-Leakage Decision Threshold Optimization
+- 81 candidate thresholds ($0.10$ to $0.90$, $\Delta t = 0.01$) evaluated **exclusively on validation predictions**.
 - Optimal operating point selected: **$t = 0.60$** (maximizing validation F1-score).
-- Audit trail generated: `test_data_used: False` verified before freezing threshold and evaluating test data.
+- Audit trail generated: `test_data_used: False` verified before evaluating test data.
+
+---
+
+## 🔬 Visual Explainability (Grad-CAM)
+
+MedVision-AI integrates a post-hoc Grad-CAM engine computing target class gradients with respect to `conv5_block16_2_conv`:
+
+```bash
+# Generate Grad-CAM visualization from CLI
+python scripts/gradcam.py \
+  --checkpoint final_artifacts/densenet121_stage2_best.keras \
+  --image test_dl.dcm \
+  --threshold 0.60 \
+  --output-dir artifacts/explainability
+```
+
+Generates normalized heatmaps, alpha-blended overlays ($\alpha=0.40$), and side-by-side comparative panels.
+
+---
+
+## 🌐 FastAPI REST API Service
+
+Asynchronous, typed REST service with Pydantic validation:
+
+```bash
+# Start API server
+uvicorn medvision.api.main:app --host 0.0.0.0 --port 8000
+```
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Service status, active model, device, and frozen threshold |
+| `GET` | `/metadata` | Architectural specs, parameters (7.3M), and held-out test benchmarks |
+| `POST` | `/predict` | Ingests radiograph, returns pneumonia probability & binary flag |
+| `POST` | `/explain` | Returns Base64-encoded Grad-CAM heatmap and blended overlay |
+| `POST` | `/predict-and-explain` | Unified prediction and visual explanation response |
+
+---
+
+## 🩺 Streamlit Interactive Radiologist Dashboard
+
+```bash
+# Launch Streamlit web application
+streamlit run app/streamlit_app.py --server.port 8501
+```
+
+Features:
+- **Direct DICOM Parsing:** Native 16-bit DICOM ingestion with VOI LUT windowing and fallback percentile clipping.
+- **Interactive Threshold Slider:** Dynamically inspect sensitivity vs. specificity operating trade-offs.
+- **Side-by-Side Saliency Visualizer:** Inspect original radiograph alongside Grad-CAM focal opacity localization.
+- **Persistent Non-Clinical Disclaimer:** Transparent educational framing.
+
+---
+
+## 🐳 Docker Deployment
+
+```bash
+# Build production container
+docker build -t medvision-ai:latest .
+
+# Run REST API (Port 8000)
+docker run -d -p 8000:8000 --name medvision-api medvision-ai:latest
+
+# Run with Docker Compose (API + UI)
+docker compose up -d
+```
 
 ---
 
@@ -134,46 +209,17 @@ Predicted Pneumonia (1,075):     491 (FP)                584 (TP)
 
 ## ⚡ Automated Testing & Reproducibility
 
-MedVision-AI provides a deterministic 5% synthetic/development data loader enabling complete local execution and CI testing without downloading the full 30 GB dataset.
-
-### 1. Environment Setup
 ```bash
-# Clone repository
-git clone https://github.com/SwastikPandey1024/MedVision-AI.git
-cd MedVision-AI
-
-# Create virtual environment (Python 3.11)
+# 1. Setup virtual environment
 python -m venv .venv
-.venv\Scripts\activate  # Windows (or: source .venv/bin/activate on Linux/macOS)
-
-# Install in editable mode with development & testing dependencies
+.venv\Scripts\activate  # On Linux/macOS: source .venv/bin/activate
 pip install -e ".[dev]"
-```
 
-### 2. Run Automated Pytest Suite (74 Tests)
-```bash
+# 2. Run automated test suite (92 tests)
 python -m pytest tests/ -q
-```
 
-### 3. Local Evaluation Smoke Test (Development Mode)
-```bash
-python scripts/evaluate.py \
-  --checkpoint final_artifacts/densenet121_stage2_best.keras \
-  --mode development \
-  --split all \
-  --optimize-threshold \
-  --threshold-criterion f1_score \
-  --output-dir artifacts/evaluation
-```
-
-### 4. Cloud Multi-GPU Training (Kaggle)
-Use the versioned notebook [`notebooks/kaggle/medvision_ai_kaggle_gpu.ipynb`](notebooks/kaggle/medvision_ai_kaggle_gpu.ipynb) on 2 × Tesla T4 GPUs:
-```bash
-# Stage 1: Feature Extraction
-python scripts/train.py --mode full --stage stage1 --epochs 5 --batch-size 64 --mixed-precision --auto-resume
-
-# Stage 2: Fine-Tuning
-python scripts/train.py --mode full --stage stage2 --epochs 3 --batch-size 32 --mixed-precision --auto-resume
+# 3. Execute concurrent load testing
+python scripts/load_test.py --endpoint /health --requests 50 --concurrency 5
 ```
 
 ---
@@ -182,30 +228,42 @@ python scripts/train.py --mode full --stage stage2 --epochs 3 --batch-size 32 --
 
 ```
 MedVision-AI/
-├── artifacts/                  # Local evaluation metrics, audit JSONs, and plot outputs
-│   └── evaluation/             # Confusion matrices, ROC/PR curves, threshold audit reports
+├── api/                        # REST API package entrypoint
+├── app/                        # Streamlit web application
+│   ├── components/             # Header, disclaimer, metrics card components
+│   ├── services/               # Caching and inference service
+│   └── streamlit_app.py        # Streamlit dashboard layout
+├── artifacts/                  # Local evaluation metrics, audit JSONs, plots, Grad-CAMs
+│   ├── evaluation/             # Confusion matrices, ROC/PR curves, threshold audit reports
+│   └── explainability/         # Generated Grad-CAM visual assets
 ├── docs/                       # Project documentation & portfolio assets
 │   ├── architecture.md         # System architecture & Mermaid diagrams
-│   ├── demo_assets.md          # Visual asset and screenshot catalog
-│   ├── disclaimer.md           # Non-clinical research and education disclaimer
 │   ├── final_metrics.md        # Comprehensive verified metrics breakdown
-│   ├── linkedin_description.md # Recruiter-ready LinkedIn posts and descriptions
-│   ├── portfolio.md            # In-depth portfolio case study
+│   ├── phase8_gradcam.md       # Grad-CAM engine design & math
+│   ├── phase9_api.md           # FastAPI route specifications
+│   ├── phase10_streamlit.md    # Streamlit UI architecture
+│   ├── phase11_deployment.md   # Docker & multi-cloud deployment guide
+│   ├── phase12_integration_loadtest.md # Load test benchmarks
+│   ├── phase_status.md         # 13-phase implementation registry
+│   ├── portfolio/              # Recruiter, architecture, and demo scripts
 │   ├── reproducibility.md      # Step-by-step reproduction guide
-│   └── resume_bullets.md       # Tailored resume bullet points
-├── notebooks/                  # Interactive experimentation & cloud execution
-│   └── kaggle/                 # Multi-GPU Kaggle production training notebook
+│   └── screenshot_gallery.md   # Visual asset inventory
+├── final_artifacts/            # Validated model checkpoints (local only)
 ├── scripts/                    # Command-line entry points
-│   ├── evaluate.py             # Multi-split evaluation & threshold optimization engine
-│   ├── train.py                # Two-stage training & resume lifecycle runner
-│   └── visualize_model.py      # Architecture summary and graph exporter
+│   ├── evaluate.py             # Multi-split evaluation & threshold engine
+│   ├── gradcam.py              # Grad-CAM saliency CLI runner
+│   ├── load_test.py            # Concurrent benchmark runner
+│   └── train.py                # Two-stage training lifecycle runner
 ├── src/medvision/              # Core application package
+│   ├── api/                    # FastAPI routers, schemas, services
 │   ├── data/                   # DICOM/PNG ingestion, group splitting, tf.data pipeline
-│   ├── evaluation/             # Metrics, ROC/PR plotting, threshold search, audit export
-│   ├── explainability/         # Grad-CAM saliency mapping (Phase 8)
-│   ├── models/                 # Custom CNN baseline & DenseNet121 architecture definitions
-│   └── utils/                  # Custom metrics (Specificity, F1), logging, checkpoint tools
-└── tests/                      # Automated unit test suite (74 tests)
+│   ├── evaluation/             # Metrics, ROC/PR plotting, threshold search
+│   ├── explainability/         # Grad-CAM saliency mapping engine
+│   ├── models/                 # Custom CNN baseline & DenseNet121 architecture
+│   └── utils/                  # Model loader, custom metrics, logging, forensics
+├── tests/                      # Automated unit & integration test suite (92 tests)
+├── Dockerfile                  # Production container definition (Python 3.11-slim)
+└── docker-compose.yml          # Multi-service local orchestration
 ```
 
 ---
@@ -220,12 +278,12 @@ MedVision-AI/
 - [x] **Phase 5: Controlled Layer Fine-Tuning & BatchNorm Protection**
 - [x] **Phase 6: Systematic Hyperparameter & Numerical Forensics**
 - [x] **Phase 7: Comprehensive Zero-Leakage Evaluation & Threshold Selection**
-- [ ] **Phase 8: Grad-CAM Saliency & Visual Explainability Engine**
-- [ ] **Phase 9: FastAPI / Flask REST API Service**
-- [ ] **Phase 10: Streamlit Interactive Radiograph Diagnostic UI**
-- [ ] **Phase 11: Docker Containerization & Cloud Deployment**
-- [ ] **Phase 12: End-to-End Integration & Load Testing**
-- [ ] **Phase 13: Open-Source Community Release & Paper Documentation**
+- [x] **Phase 8: Grad-CAM Saliency & Visual Explainability Engine**
+- [x] **Phase 9: FastAPI REST API Service**
+- [x] **Phase 10: Streamlit Interactive Radiograph Diagnostic UI**
+- [x] **Phase 11: Docker Containerization & Cloud-Ready Deployment**
+- [x] **Phase 12: End-to-End Integration & Load Testing**
+- [x] **Phase 13: Open-Source Community Release & Paper Documentation**
 
 ---
 

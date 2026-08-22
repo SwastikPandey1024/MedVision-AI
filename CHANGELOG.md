@@ -5,6 +5,29 @@ All notable changes to the **MedVision-AI** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-08-22
+
+### Added
+- **Phase 8: Grad-CAM Saliency & Visual Explainability Engine**:
+  - Implemented `compute_gradcam_heatmap`, `overlay_heatmap`, and `generate_gradcam_explanation` targeting `conv5_block16_2_conv` in `src/medvision/explainability/gradcam.py`.
+  - Added CLI runner `scripts/gradcam.py` supporting single image, batch processing, DICOM CR/DX windowing, and side-by-side export.
+  - Added unit test suite in `tests/test_gradcam.py`.
+- **Phase 9: FastAPI REST API Service**:
+  - Implemented asynchronous REST API service with endpoints `GET /health`, `GET /metadata`, `POST /predict`, `POST /explain`, and `POST /predict-and-explain` in `src/medvision/api/`.
+  - Added Pydantic validation schemas, in-memory zero-storage decoding, file-size limits (25MB), and structured logging.
+  - Added test suite in `tests/test_api.py`.
+- **Phase 10: Streamlit Interactive Radiograph Diagnostic UI**:
+  - Created interactive radiologist web dashboard in `app/streamlit_app.py` with DICOM/PNG ingestion, real-time threshold slider ($t=0.60$), and Grad-CAM side-by-side visualizer.
+  - Added modular components in `app/components/` and cached model loading service in `app/services/`.
+- **Phase 11: Docker Containerization & Multi-Cloud Deployment**:
+  - Added production `Dockerfile` (Python 3.11-slim, non-root user `appuser`, healthcheck probe) and `docker-compose.yml`.
+  - Added deployment recipes for Render, Railway, Hugging Face Spaces, GCP Cloud Run, and AWS ECS in `docs/phase11_deployment.md`.
+- **Phase 12: End-to-End Integration & Load Testing**:
+  - Implemented integration test suite `tests/test_integration.py` covering edge cases, oversized uploads, and end-to-end inference.
+  - Added concurrent load testing engine `scripts/load_test.py` measuring latency percentiles (p50, p95, p99) and throughput.
+- **Phase 13: Open-Source Community Release & Paper Documentation**:
+  - Created `CODE_OF_CONDUCT.md`, `docs/research_notes.md`, `docs/paper_outline.md`, `docs/experiment_log.md`, `docs/phase_status.md`, and complete portfolio narrative assets in `docs/portfolio/`.
+
 ## [0.5.0-alpha] - 2026-08-12
 
 ### Fixed & Added

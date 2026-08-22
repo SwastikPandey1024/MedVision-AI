@@ -1,26 +1,17 @@
 """Streamlit Web Application dashboard entrypoint (Phase 10)."""
 
-import streamlit as st
+import sys
+from pathlib import Path
 
+# Ensure root and app directories are in sys.path
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
+APP_DIR = str(ROOT_DIR / "app")
+SRC_DIR = str(ROOT_DIR / "src")
+for p in [APP_DIR, SRC_DIR, str(ROOT_DIR)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-def main() -> None:
-    """Render Streamlit frontend interface."""
-    st.set_page_config(
-        page_title="MedVision-AI: Pneumonia Detection",
-        page_icon="🩺",
-        layout="wide",
-    )
-
-    st.title("🩺 MedVision-AI: Explainable Pneumonia Detection System")
-    st.caption("AI-Assisted Research & Educational Tool | Not for Clinical Use")
-
-    st.warning(
-        "⚠️ **Disclaimer**: MedVision-AI is an educational research prototype. "
-        "It has not been cleared by FDA/CE for clinical diagnostic use."
-    )
-
-    st.info("Phase 0 Initialization complete. Streamlit interactive UI will be implemented in Phase 10.")
-
+from app.streamlit_app import main
 
 if __name__ == "__main__":
     main()
