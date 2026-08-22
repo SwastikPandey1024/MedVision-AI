@@ -259,6 +259,8 @@ def evaluate_model_performance(
 
     result = {
         "metrics": metrics,
+        "y_true": y_true,
+        "y_pred_prob": y_pred_prob,
         "json_path": json_path,
         "md_path": md_path,
         "plots": plot_paths,

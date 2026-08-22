@@ -207,3 +207,74 @@ def test_evaluate_script_cli_execution(tmp_path, monkeypatch):
     assert (out_dir / "dummy_model_test_report.md").exists()
     assert (out_dir / "model_comparison_report.md").exists()
     assert (out_dir / "model_comparison_summary.json").exists()
+
+
+def test_save_threshold_audit_report(tmp_path):
+    """Verify threshold selection audit reports (JSON and Markdown) are saved cleanly."""
+    from medvision.evaluation import select_optimal_threshold_from_val, save_threshold_audit_report
+
+    val_y_true = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    val_y_pred = np.array([0.1, 0.2, 0.4, 0.3, 0.6, 0.7, 0.8, 0.9])
+
+    audit_res = select_optimal_threshold_from_val(val_y_true, val_y_pred, criterion="f1_score")
+    paths = save_threshold_audit_report(audit_res, tmp_path, prefix="test_threshold")
+
+    assert paths["json_path"].exists() and paths["json_path"].stat().st_size > 0
+    assert paths["md_path"].exists() and paths["md_path"].stat().st_size > 0
+
+    import json
+    with open(paths["json_path"], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert data["test_data_used"] is False
+    assert "selected_threshold" in data
+
+
+def test_evaluate_script_cli_execution_with_threshold_optimization(tmp_path, monkeypatch):
+    """Verify CLI execution with validation-only threshold optimization and frozen test evaluation."""
+    import sys
+    from pathlib import Path
+    import json
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import evaluate
+
+    # Build and save a dummy model
+    model = build_custom_cnn(input_shape=(224, 224, 3), num_classes=1)
+    ckpt_path = tmp_path / "opt_model.keras"
+    model.save(ckpt_path)
+
+    out_dir = tmp_path / "eval_opt_output"
+
+    # Simulate command line arguments with --optimize-threshold
+    test_args = [
+        "evaluate.py",
+        "--checkpoint", str(ckpt_path),
+        "--mode", "development",
+        "--split", "all",
+        "--batch-size", "8",
+        "--optimize-threshold",
+        "--threshold-criterion", "f1_score",
+        "--output-dir", str(out_dir),
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+
+    evaluate.main()
+
+    # Check generated files
+    audit_json = out_dir / "opt_model_threshold_selection_audit.json"
+    audit_md = out_dir / "opt_model_threshold_selection_audit.md"
+    val_json = out_dir / "opt_model_val_report.json"
+    test_json = out_dir / "opt_model_test_report.json"
+
+    assert audit_json.exists()
+    assert audit_md.exists()
+    assert val_json.exists()
+    assert test_json.exists()
+
+    with open(audit_json, "r", encoding="utf-8") as f:
+        audit_data = json.load(f)
+    with open(test_json, "r", encoding="utf-8") as f:
+        test_data = json.load(f)
+
+    # Verify frozen threshold was applied to test without using test labels during search
+    assert audit_data["test_data_used"] is False
+    assert test_data["threshold"] == audit_data["selected_threshold"]

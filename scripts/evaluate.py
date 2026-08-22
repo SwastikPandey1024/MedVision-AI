@@ -22,12 +22,14 @@ from medvision.data.preprocessing import create_tfrecord_dataset
 from medvision.evaluation import (
     evaluate_model_performance,
     generate_model_comparison_report,
+    select_optimal_threshold_from_val,
+    save_threshold_audit_report,
 )
 from medvision.utils.metrics import Specificity, F1Score, get_model_metrics
 from medvision.utils.logger import get_logger
 
-
 logger = get_logger("medvision.evaluate_script")
+
 
 
 def resolve_evaluation_datasets(
@@ -176,6 +178,18 @@ def parse_args():
         help="Classification decision threshold (default: 0.5).",
     )
     parser.add_argument(
+        "--optimize-threshold",
+        action="store_true",
+        help="Optimize decision threshold using validation predictions only before test evaluation.",
+    )
+    parser.add_argument(
+        "--threshold-criterion",
+        type=str,
+        default="f1_score",
+        choices=["f1_score", "accuracy", "youden_j"],
+        help="Metric criterion to maximize on validation set during threshold search (default: 'f1_score').",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
@@ -197,6 +211,7 @@ def print_evaluation_summary(split_name: str, ckpt_name: str, res: Dict[str, Any
     print("=" * 65)
     print(f"Checkpoint File     : {ckpt_name}")
     print(f"Dataset Split       : {split_name}")
+    print(f"Decision Threshold  : {m['threshold']:.4f}")
     print(f"Total Samples       : {m['sample_count']}")
     print(f"PR-AUC (Primary)    : {m['pr_auc']:.4f}")
     print(f"ROC-AUC             : {m['roc_auc']:.4f}")
@@ -230,39 +245,116 @@ def main():
     logger.info(f"Loading model checkpoint from: {ckpt_path}")
     model = keras.models.load_model(ckpt_path, compile=False, safe_mode=False)
 
-
     resolved_mode, datasets_dict, meta = resolve_evaluation_datasets(
         mode=args.mode,
         batch_size=args.batch_size,
         dataset_dir=Path(args.dataset_dir) if args.dataset_dir else None,
     )
 
-    splits_to_eval = ["val", "test"] if args.split == "all" else [args.split]
     evaluated_metrics_list: List[Dict[str, Any]] = []
 
-    for split_name in splits_to_eval:
-        eval_ds = datasets_dict.get(split_name)
-        if eval_ds is None:
-            logger.error(f"Requested split '{split_name}' not available in resolved datasets.")
-            continue
+    if args.optimize_threshold:
+        logger.info("=" * 65)
+        logger.info("VALIDATION-ONLY DECISION THRESHOLD OPTIMIZATION PHASE")
+        logger.info("=" * 65)
 
-        prefix = f"{ckpt_path.stem}_{split_name}"
-        res = evaluate_model_performance(
+        val_ds = datasets_dict.get("val")
+        if val_ds is None:
+            raise ValueError("Validation dataset required for threshold optimization but not found.")
+
+        # Step A: Evaluate on validation set to collect predictions and ground truth
+        val_res = evaluate_model_performance(
             model=model,
-            dataset=eval_ds,
+            dataset=val_ds,
             output_dir=out_dir,
-            prefix=prefix,
-            threshold=args.threshold,
+            prefix=f"{ckpt_path.stem}_val_default0.50",
+            threshold=0.5,
         )
 
-        print_evaluation_summary(split_name, ckpt_path.name, res, resolved_mode)
+        val_y_true = val_res["y_true"]
+        val_y_pred_prob = val_res["y_pred_prob"]
 
-        split_metric = dict(res["metrics"])
-        split_metric["model_name"] = f"{ckpt_path.stem} ({split_name.upper()})"
-        split_metric["params"] = model.count_params()
-        evaluated_metrics_list.append(split_metric)
+        # Step B: Optimize threshold exclusively using validation predictions
+        audit_res = select_optimal_threshold_from_val(
+            val_y_true=val_y_true,
+            val_y_pred_prob=val_y_pred_prob,
+            criterion=args.threshold_criterion,
+            min_threshold=0.10,
+            max_threshold=0.90,
+            step=0.01,
+        )
+        audit_paths = save_threshold_audit_report(
+            audit_result=audit_res,
+            output_dir=out_dir,
+            prefix=f"{ckpt_path.stem}_threshold",
+        )
 
-    if args.split == "all" and len(evaluated_metrics_list) > 1:
+        frozen_threshold = float(audit_res["selected_threshold"])
+        logger.info(
+            f"FROZEN THRESHOLD SELECTED: {frozen_threshold:.4f} "
+            f"(Validation {args.threshold_criterion} = {audit_res['best_val_score']:.4f}). "
+            f"Audit saved to {audit_paths['json_path']}"
+        )
+
+        # Step C: Evaluate Validation split with optimal threshold
+        val_opt_res = evaluate_model_performance(
+            model=model,
+            dataset=val_ds,
+            output_dir=out_dir,
+            prefix=f"{ckpt_path.stem}_val",
+            threshold=frozen_threshold,
+        )
+        print_evaluation_summary("val (optimal threshold)", ckpt_path.name, val_opt_res, resolved_mode)
+
+        val_m = dict(val_opt_res["metrics"])
+        val_m["model_name"] = f"{ckpt_path.stem} (Val @ th={frozen_threshold:.2f})"
+        val_m["params"] = model.count_params()
+        evaluated_metrics_list.append(val_m)
+
+        # Step D: Apply FROZEN threshold to Test split (Test data is never seen during optimization)
+        if args.split in ["test", "all"]:
+            test_ds = datasets_dict.get("test")
+            if test_ds is not None:
+                test_res = evaluate_model_performance(
+                    model=model,
+                    dataset=test_ds,
+                    output_dir=out_dir,
+                    prefix=f"{ckpt_path.stem}_test",
+                    threshold=frozen_threshold,
+                )
+                print_evaluation_summary("test (frozen threshold)", ckpt_path.name, test_res, resolved_mode)
+
+                test_m = dict(test_res["metrics"])
+                test_m["model_name"] = f"{ckpt_path.stem} (Held-out Test @ th={frozen_threshold:.2f})"
+                test_m["params"] = model.count_params()
+                evaluated_metrics_list.append(test_m)
+
+    else:
+        splits_to_eval = ["val", "test"] if args.split == "all" else [args.split]
+
+        for split_name in splits_to_eval:
+            eval_ds = datasets_dict.get(split_name)
+            if eval_ds is None:
+                logger.error(f"Requested split '{split_name}' not available in resolved datasets.")
+                continue
+
+            prefix = f"{ckpt_path.stem}_{split_name}"
+            res = evaluate_model_performance(
+                model=model,
+                dataset=eval_ds,
+                output_dir=out_dir,
+                prefix=prefix,
+                threshold=args.threshold,
+            )
+
+            print_evaluation_summary(split_name, ckpt_path.name, res, resolved_mode)
+
+            split_metric = dict(res["metrics"])
+            split_metric["model_name"] = f"{ckpt_path.stem} ({split_name.upper()})"
+            split_metric["params"] = model.count_params()
+            evaluated_metrics_list.append(split_metric)
+
+    if len(evaluated_metrics_list) > 1:
         comp_res = generate_model_comparison_report(evaluated_metrics_list, output_dir=out_dir)
         logger.info(f"Multi-split comparison report written to: {comp_res['markdown_path']}")
 
