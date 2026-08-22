@@ -9,13 +9,12 @@
 
 <!-- TOP PRIMARY CTA ROW -->
 [![Live Streamlit App](https://img.shields.io/badge/🚀%20LIVE%20APP-medvision--ai--pneumonia.streamlit.app-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://medvision-ai-pneumonia.streamlit.app/)
-[![GitHub Repository](https://img.shields.io/badge/◈%20REPOSITORY-SwastikPandey1024%2FMedVision--AI-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/SwastikPandey1024/MedVision-AI)
 [![View Case Study](https://img.shields.io/badge/👁%20VIEW%20PROJECT-Case%20Study-0A66C2?style=for-the-badge&logo=readme&logoColor=white)](docs/portfolio.md)
 
 <br/>
 
 <!-- COMPACT PROJECT NAVIGATION STRIP -->
-| [👁 **View Case Study**](docs/portfolio.md) | [◈ **GitHub Repository**](https://github.com/SwastikPandey1024/MedVision-AI) | [🚀 **Launch Live App**](https://medvision-ai-pneumonia.streamlit.app/) | [🌐 **medvision-ai-pneumonia.streamlit.app**](https://medvision-ai-pneumonia.streamlit.app/) |
+| [👁 **View Case Study**](docs/portfolio.md) | | [🚀 **Launch Live App**](https://medvision-ai-pneumonia.streamlit.app/) | [🌐 **medvision-ai-pneumonia.streamlit.app**](https://medvision-ai-pneumonia.streamlit.app/) |
 | :---: | :---: | :---: | :---: |
 
 <br/>
