@@ -103,3 +103,107 @@ def test_generate_model_comparison_report(tmp_path):
     assert df.iloc[0]["model_name"] == "DenseNet121 Stage 2"
     assert df.iloc[1]["model_name"] == "DenseNet121 Stage 1"
     assert df.iloc[2]["model_name"] == "Custom CNN Baseline"
+
+
+def test_resolve_evaluation_datasets_development_mode():
+    """Verify evaluation dataset resolution in development mode."""
+    import sys
+    from pathlib import Path
+    # Import resolve_evaluation_datasets from scripts.evaluate
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    from evaluate import resolve_evaluation_datasets
+
+    mode, datasets, meta = resolve_evaluation_datasets(mode="development", batch_size=8)
+
+    assert mode == "development"
+    assert "val" in datasets and "test" in datasets and "train" in datasets
+    assert meta["source"] == "dev_subset"
+    assert meta["n_val"] > 0
+    assert meta["n_test"] > 0
+
+    # Verify we can extract a batch from the validation dataset
+    for x_b, y_b in datasets["val"].take(1):
+        assert x_b.shape[1:] == (224, 224, 3)
+        assert y_b.shape[1:] == (1,)
+
+
+def test_resolve_evaluation_datasets_auto_fallback():
+    """Verify evaluation dataset resolution falls back gracefully in auto mode."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    from evaluate import resolve_evaluation_datasets
+
+    mode, datasets, meta = resolve_evaluation_datasets(mode="auto", batch_size=8)
+    assert mode in ["development", "full"]
+    assert "val" in datasets and "test" in datasets
+
+
+def test_resolve_evaluation_datasets_full_mode_with_synthetic_manifest(tmp_path):
+    """Verify full mode data resolution and patient-aware split pipeline using mock RSNA folder."""
+    import sys
+    from pathlib import Path
+    import pandas as pd
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    from evaluate import resolve_evaluation_datasets
+
+    mock_rsna = tmp_path / "rsna"
+    mock_rsna.mkdir(parents=True)
+    images_dir = mock_rsna / "stage_2_train_images"
+    images_dir.mkdir(parents=True)
+
+    # Create dummy labels for 20 patients
+    rows = []
+    for i in range(20):
+        pid = f"PATIENT_{i:03d}"
+        target = 1 if i < 6 else 0
+        rows.append(f"{pid},100.0,100.0,50.0,50.0,{target}")
+        # Create a dummy image file
+        (images_dir / f"{pid}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    labels_csv = mock_rsna / "stage_2_train_labels.csv"
+    labels_csv.write_text("patientId,x,y,width,height,Target\n" + "\n".join(rows) + "\n")
+
+    mode, datasets, meta = resolve_evaluation_datasets(mode="full", batch_size=4, dataset_dir=mock_rsna)
+    assert mode == "full"
+    assert meta["source"] == "real_rsna"
+    assert meta["n_train"] == 14
+    assert meta["n_val"] == 3
+    assert meta["n_test"] == 3
+
+
+def test_evaluate_script_cli_execution(tmp_path, monkeypatch):
+    """Verify end-to-end evaluate CLI execution for --split all in development mode."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import evaluate
+
+    # Build and save a dummy model
+    model = build_custom_cnn(input_shape=(224, 224, 3), num_classes=1)
+    ckpt_path = tmp_path / "dummy_model.keras"
+    model.save(ckpt_path)
+
+    out_dir = tmp_path / "eval_all_output"
+
+    # Simulate command line arguments
+    test_args = [
+        "evaluate.py",
+        "--checkpoint", str(ckpt_path),
+        "--mode", "development",
+        "--split", "all",
+        "--batch-size", "8",
+        "--threshold", "0.5",
+        "--output-dir", str(out_dir),
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+
+    evaluate.main()
+
+    # Check generated files
+    assert (out_dir / "dummy_model_val_report.json").exists()
+    assert (out_dir / "dummy_model_val_report.md").exists()
+    assert (out_dir / "dummy_model_test_report.json").exists()
+    assert (out_dir / "dummy_model_test_report.md").exists()
+    assert (out_dir / "model_comparison_report.md").exists()
+    assert (out_dir / "model_comparison_summary.json").exists()
