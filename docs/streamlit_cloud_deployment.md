@@ -16,7 +16,7 @@
 | **Package Dependency File** | `requirements.txt` |
 | **Model Weights File** | `densenet121_stage2_best.keras` (~28 MB - 65 MB) |
 | **Required Secret / Env Variable** | `MODEL_URL` or `MEDVISION_MODEL_URL` |
-| **Expected Public URL Format** | `https://medvision-ai.streamlit.app` (or custom subdomain) |
+| **Live Public Application URL** | [`https://medvision-ai-pneumonia.streamlit.app/`](https://medvision-ai-pneumonia.streamlit.app/) |
 
 ---
 
